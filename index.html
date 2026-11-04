@@ -206,7 +206,7 @@ function suggestions(data,state){
  const effectiveLog=applyCallouts(plan,state.callouts);
  const edits=new Map((state.hourEdits||[]).map(e=>[e.index,e]));
  const ranks=state.rankEdits||{};
- const assignments=data.records.map((r,sourceIndex)=>{const e=edits.get(sourceIndex);return {...r,sourceIndex,start:e?.start??r.start,end:e?.end??r.end,...(ranks[r.id]?{rank:ranks[r.id]}:{})}});
+ const assignments=data.records.map((r,sourceIndex)=>{const e=edits.get(sourceIndex);return {...r,sourceIndex,start:e?.start??r.start,end:e?.end??r.end,...(ranks[r.id]?{rank:ranks[r.id],inferred:false}:{})}});
  data={...data,records:applyCallouts(assignments,state.callouts,true)};
  let recs=projected(data,effectiveLog),bs=[...new Set([...bounds(data,recs),...(state.callouts||[]).flatMap(x=>[x.start,x.end]),...(state.hireMarks||[]).flatMap(x=>[x.start,x.end])])].sort((a,b)=>a-b),byMove=new Map(),pass=state.pass,issues=[];
  for(let k=0;k<bs.length-1;k++){
@@ -1185,23 +1185,24 @@ function rosterRank(id){return data.records.find(r=>r.id===id&&r.rank!=='Unknown
 function rankFlags(r){
  const kindOf=swapKind(r),changed=state.rankEdits?.[r.id],i=result.recs.indexOf(r);
  if(!kindOf&&!changed)return '';
- return ' <button type=button class="codePill tradePill'+(changed?' changed':'')+'" onclick="openRank('+i+')" title="Check this member’s own rank">'+esc(changed?'Rank set to '+changed+(kindOf?' · '+kindOf:''):kindOf+' · check rank')+'</button>';
+ return ' <button type=button class="codePill tradePill'+(changed?' changed':'')+'" onclick="openRank('+i+')" title="Check this member’s own rank">'+esc(changed?'Rank confirmed: '+changed+(kindOf?' · '+kindOf:''):kindOf+' · check rank')+'</button>';
 }
 let rankMember=null;
 function openRank(i){
  rankMember=result.recs[i];if(!rankMember)return;
  const orig=rosterRank(rankMember.id),kindOf=swapKind(rankMember);
  $('rankTitle').textContent='Rank · '+rankMember.name;
- $('rankInfo').textContent=rankMember.unit+' · '+rankMember.code+'. The roster shows '+orig+(kindOf?', the rank of the position on this '+kindOf.toLowerCase()+'. Set the member’s own rank if it is different.':'.');
+ $('rankInfo').textContent=rankMember.unit+' · '+rankMember.code+'. The roster shows '+orig+(kindOf?', the rank of the position on this '+kindOf.toLowerCase()+'. Confirm the member’s own rank.':'.');
  $('rankPick').value=state.rankEdits?.[rankMember.id]||orig;$('rankError').textContent='';$('rankDialog').showModal();
 }
 function saveRank(){if(!rankMember)return;if(setRank(rankMember.id,$('rankPick').value))$('rankDialog').close()}
 function setRank(id,rank){
  if(!['Lt','Eng','FF'].includes(rank))return false;
- if(state.log.some(m=>m.id===id)){const msg='Undo this member’s approved moves before changing their rank.';if($('rankDialog').open)$('rankError').textContent=msg;else{note(msg);draw()}return false}
+ if(state.log.some(m=>m.id===id)&&data.records.some(r=>r.id===id&&onCodes.includes(r.code)&&(state.rankEdits?.[id]||r.rank)!==rank)){const msg='Undo this member’s approved moves before changing their rank.';if($('rankDialog').open)$('rankError').textContent=msg;else{note(msg);draw()}return false}
  const orig=rosterRank(id),name=data.records.find(r=>r.id===id)?.name||id;
- if(rank===orig){if(state.rankEdits)delete state.rankEdits[id]}else(state.rankEdits??={})[id]=rank;
- state.skip=[];recon='';draw();note(name+(rank===orig?' uses their roster rank ('+orig+') again.':' now planned as '+rank+'. Openings and suggestions are updated.'));return true;
+ if(rank!==orig||data.records.some(r=>r.id===id&&swapKind(r)))(state.rankEdits??={})[id]=rank;
+ else if(state.rankEdits)delete state.rankEdits[id];
+ state.skip=[];recon='';draw();note(name+(rank===orig?' confirmed at roster rank '+orig+'.':' now planned as '+rank+'. Openings and suggestions are updated.'));return true;
 }
 function canMove(r){return ['Lt','Eng','FF'].includes(r.rank)&&(kind(r.unit)==='Rover'||!!state.rules[r.unit]?.active)}
 function unitShiftChanges(unit,whole=false){
@@ -1695,13 +1696,13 @@ function guideWindows(i){
 }
 function tradeCheck(){
  const seen=new Set(),rows=result.recs.filter(r=>swapKind(r)&&!seen.has(r.id)&&seen.add(r.id));
- const pick=r=>{const cur=state.rankEdits?.[r.id]||rosterRank(r.id);return '<select aria-label="Rank for '+esc(r.name)+'" data-id="'+esc(r.id)+'" onchange="setRank(this.dataset.id,this.value)">'+['Lt','Eng','FF'].map(x=>'<option '+(x===cur?'selected':'')+'>'+x+'</option>').join('')+'</select>'};
- return '<section class=card><h2>Shift trades and Kelly swaps · '+rows.length+'</h2><p>A member working a shift trade (STW) or Kelly swap (KSON) appears with the rank of the position they fill. Check each one and set their own rank if it is different, for example a firefighter trading into an engineer seat.</p>'+
+ const pick=r=>{const cur=state.rankEdits?.[r.id]||rosterRank(r.id);return '<select aria-label="Rank for '+esc(r.name)+'" data-id="'+esc(r.id)+'" onchange="setRank(this.dataset.id,this.value)"> '+(cur==='Unknown'?'<option selected disabled>Choose rank</option>':'')+['Lt','Eng','FF'].map(x=>'<option '+(x===cur?'selected':'')+'>'+x+'</option>').join('')+'</select> '+(state.rankEdits?.[r.id]?'Confirmed':cur==='Unknown'?'':'<button type=button data-id="'+esc(r.id)+'" onclick="setRank(this.dataset.id,rosterRank(this.dataset.id))">Confirm '+esc(cur)+'</button>')};
+ return '<section class=card><h2>Shift trades and Kelly swaps · '+rows.length+'</h2><p>A member working a shift trade (STW) or Kelly swap (KSON) appears with the rank of the position they fill. Confirm the displayed rank or select the member’s own rank.</p>'+
  (rows.length?table(['Member','Unit','Code','Roster shows','Plan as'],rows.map(r=>row([esc(r.name),esc(r.unit),esc(r.code),esc(rosterRank(r.id)),pick(r)])).join('')):'<p class=muted>No shift trades or Kelly swaps on this roster.</p>')+'</section>';
 }
 function importCheck(){
  const counts=result.bs.slice(0,-1).map(t=>unique(active(result.recs,t)).length),lo=Math.min(...counts),rules=Object.values(state.rules);
- const items=[['Shift date',esc(data.date)+' · 0800 to 0800'],['Source',esc(source)],['Roster rows read',data.records.length],['Apparatus in service',rules.filter(r=>r.active).length+' of '+rules.length],['Lowest on duty',lo+' against the '+shiftMin()+' minimum'],['Members locked in place',state.locks.length||'None'],['Rank changes',Object.keys(state.rankEdits||{}).length||'None']];
+ const items=[['Shift date',esc(data.date)+' · 0800 to 0800'],['Source',esc(source)],['Roster rows read',data.records.length],['Apparatus in service',rules.filter(r=>r.active).length+' of '+rules.length],['Lowest on duty',lo+' against the '+shiftMin()+' minimum'],['Members locked in place',state.locks.length||'None'],['Ranks reviewed',Object.keys(state.rankEdits||{}).length||'None']];
  return '<section class=card><h2>Imported roster</h2>'+table(['Check','Result'],items.map(x=>row(x)).join(''))+(data.warnings.length?'<div class=warn>'+esc(data.warnings.join(' '))+'</div>':'<p>No import warnings.</p>')+'<div class=actions><button onclick="openView(&quot;Roster&quot;)">Remove members or change hours</button></div></section>'+tradeCheck();
 }
 function guidePanel(){
