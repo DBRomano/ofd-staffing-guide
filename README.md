@@ -8,6 +8,7 @@ A job aid for the staffing officer: build the shift roster here, then enter it i
 
 - Imports the TeleStaff **Roster Report** XLSX for one shift (0800 to 0800).
 - Shows every unit's crew, open seats and needs (officer, driver, paramedic, team letters, L).
+- **Auto-build** works out a whole-shift plan in one click: officer, driver, paramedic and team needs first, then open seats, Kelly Day openings last, using the fewest moves and never leaving a new gap on the unit a member comes from. Approve all of it, one move at a time, or skip moves and rebuild.
 - Suggests moves and exchanges between units, including ride-ups (an engineer as lieutenant, a firefighter with E or T as driver). Kelly Day openings are suggested last.
 - Lets the officer move people by drag and drop, by tapping a name and then a seat, or from the candidate list.
 - Produces a TeleStaff handoff sheet (print or CSV): removals, hour changes, moves, seats to fill by Kelly Day hiring, and needs to solve by moving people.
