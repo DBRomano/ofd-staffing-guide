@@ -97,8 +97,8 @@ function parseRows(rows,date){
  return {date,records,units,warnings};
 }
 function rulesFor(data){return Object.fromEntries(Object.keys(data.units).filter(u=>kind(u)==='Apparatus').map(u=>[u,{min:standard(u),team:({'Tower 1':'AD','Tower 15':'AD','Tower 2':'H','Tower 8':'H','Tower 9':'H','Tower 10':'A','Tower 11':'A','Engine 101':'H','Engine 19':'H','Heavy Rescue 1':'AD','Hazmat 1':'H'}[u]||''),paid:3,pref:4,active:true}]))}
-function working(data){
- const scheduled=data.records.filter(r=>onCodes.includes(r.code)&&['Apparatus','Rover','Command'].includes(kind(r.unit)));
+function working(data,unitTypes=['Apparatus','Rover','Command']){
+ const scheduled=data.records.filter(r=>onCodes.includes(r.code)&&unitTypes.includes(kind(r.unit)));
  // Partial leave takes the member off any working row it overlaps, wherever TeleStaff lists it.
  const leave=data.records.filter(r=>['SICKEX','SICKEXU','VAC','PERLV','MILLV'].includes(r.code)&&(r.start>0||r.end<shiftEnd));
  return scheduled.flatMap(r=>applyCallouts([r],leave.filter(h=>h.id===r.id)));
@@ -850,7 +850,7 @@ function autoPanel(){
  out+=(stale?'<p class=warn>The roster changed after this plan was built. Rebuild before approving.</p>':'')+
  '<section class=card><h2>'+(p.length?p.length+' moves planned':'No moves found')+'</h2><div class=metrics><div class=metric><small>Members moved</small><b>'+people+'</b></div><div class=metric><small>Ride-ups</small><b>'+ride+'</b></div><div class=metric><small>Unresolved need windows</small><b>'+rem.length+'</b></div></div>'+
  '<p class=muted>Built in '+(autoRun.ms/1000).toFixed(1)+' s. Moves are listed in the order they were chosen; later moves can depend on earlier ones.</p>'+
- (p.length||autoRun.marks.length||(state.hireMarks||[]).some(m=>m.source==='auto')?'<div class=actions><button class=primary '+(stale?'disabled':'')+' onclick="approvePlan()">Approve all '+p.length+(autoRun.marks.length?' and mark for hiring':'')+'</button><button onclick="openView(&quot;Roster&quot;)">Check on the crew roster</button></div>':'')+'</section>'+
+ (p.length||autoRun.marks.length||(state.hireMarks||[]).some(m=>m.source==='auto')?'<div class=actions><button class=primary '+(stale?'disabled':'')+' onclick="approvePlan()">Approve all '+p.length+(autoRun.marks.length?' and mark for hiring':'')+'</button><button onclick="openView(&quot;Roster&quot;)">Check on the crew roster</button></div>':'')+'<button '+(stale?'disabled':'')+' onclick="exportRoster(true)">Print proposed roster / Save PDF</button></section>'+
  '<section class=card><h3>Projected shift shortage and apparatus openings</h3>'+balanceTable(autoRun.balance)+autoRun.balance.seats.filter(o=>o.status==='Review on-duty placement').map(o=>'<p>Review on-duty placement · '+esc(o.unit)+' · '+esc(o.role)+' · '+needWhen(o.start,o.end)+'<br><small>'+esc(o.detail)+'</small></p>').join('')+'</section>'+
  reviewPanel+p.map((it,i)=>{const m=it.legs[0];
   return '<article class="card planItem"><small>'+(i+1)+' · '+esc(it.need.u)+' · '+esc(needLabel(it.need.key))+(it.need.soft?(it.need.key==='medicLt'?' · preferred':' · '+prefOf(state.rules[it.need.u])+' preferred'):'')+' · '+needWhen(it.start,it.end)+'</small><h3>'+esc(m.name)+' · '+(m.from===m.to?'rides up to '+(m.role==='Lt'?'lieutenant':'driver')+' on '+esc(m.to):esc(m.from)+' → '+esc(m.to)+' · '+esc(m.role)+(m.rideUp?' (ride-up)':''))+'</h3>'+
@@ -945,7 +945,7 @@ function rosterToolbar(units){
  const districts=new Map();for(const x of units){const d=x.meta.region||'Other';if(!districts.has(d))districts.set(d,[]);districts.get(d).push(x)}
  const jump='<select aria-label="Jump to unit" onchange="jumpUnit(this.value)"><option value="">Jump to unit…</option>'+[...districts].map(([d,xs])=>'<optgroup label="'+esc(d)+'">'+xs.map(x=>'<option value="'+esc(x.u)+'">'+esc(x.u)+(x.needs.length?' · needs coverage':x.give?' · can give':'')+'</option>').join('')+'</optgroup>').join('')+'</select>';
  return '<section class="card rosterBar"><div class="queueFilters" role="group" aria-label="Show units">'+shows.map(([k,l,c])=>'<button data-show="'+k+'" aria-pressed="'+(rosterShow===k)+'" onclick="rosterShow=this.dataset.show;draw()">'+l+'<span class="count">'+c+'</span></button>').join('')+'</div>'+
- '<div class="rosterFind"><button type=button class="primary" onclick="openView(&quot;Auto-build&quot;)">Auto-build plan</button>'+jump+'<label>Qualification <select title="Letters match exactly. D finds paid Dive members; lowercase d finds other Dive-qualified members." onchange="finderLetter=this.value;draw()"><option value="">Any</option>'+select(letters,finderLetter)+'</select></label><label>Rank <select onchange="finderRank=this.value;draw()"><option value="">Any</option>'+select(['Lt','Eng','FF'],finderRank)+'</select></label></div></section>';
+ '<div class="rosterFind"><button type=button class="primary" onclick="openView(&quot;Auto-build&quot;)">Auto-build plan</button><button type=button onclick="exportRoster()">Print roster / Save PDF</button>'+jump+'<label>Qualification <select title="Letters match exactly. D finds paid Dive members; lowercase d finds other Dive-qualified members." onchange="finderLetter=this.value;draw()"><option value="">Any</option>'+select(letters,finderLetter)+'</select></label><label>Rank <select onchange="finderRank=this.value;draw()"><option value="">Any</option>'+select(['Lt','Eng','FF'],finderRank)+'</select></label></div></section>';
 }
 function jumpUnit(u){
  if(!u)return;
@@ -1232,11 +1232,11 @@ function sickList(){
 }
 
 function fullView(){return fullShift&&(tab==='Roster'||tab==='Openings')}
-function unitDay(u){
+function unitDay(u,view=result){
  const rule=state.rules[u],needs=[],last=new Map(),heads=[];
- const records=result.recs.filter(r=>r.unit===u);
- for(let i=0;i<result.bs.length-1;i++){
-  const start=result.bs[i],end=result.bs[i+1],crew=unique(active(records,start));
+ const records=view.recs.filter(r=>r.unit===u);
+ for(let i=0;i<view.bs.length-1;i++){
+  const start=view.bs[i],end=view.bs[i+1],crew=unique(active(records,start));
   heads.push(crew.length);
   if(!rule?.active)continue;
   for(const [key,n] of Object.entries(gapProfile(u,crew,rule))){
@@ -1410,6 +1410,53 @@ function entryStatus(key){return state.entries?.[key]||'Planned'}
 function moveStatus(m){return m.entryStages?.[m.start+'-'+m.end]||'Planned'}
 function setEntry(key,stage){if(!handoffStages.includes(stage))return;(state.entries??={})[key]=stage;draw()}
 function statusControl(key,label){const s=entryStatus(key);return '<select aria-label="TeleStaff entry status for '+esc(label)+'" data-key="'+esc(key)+'" onchange="setEntry(this.dataset.key,this.value)">'+handoffStages.map(v=>'<option '+(s===v?'selected':'')+'>'+v+'</option>').join('')+'</select>'}
+function rosterExportHTML(proposed=false){
+ const approved=result.effectiveLog;
+ const pending=proposed?autoRun.plan.flatMap((p,i)=>p.legs.map(l=>({...l,batch:p.legs.length>1?'P-'+(i+1):null,pending:true}))):[];
+ const moves=[...approved,...pending];
+ const view=pending.length?{...result,recs:applyMoves(result.recs,pending)}:result;
+ const civilians=working(view.planningData,['Civilian']);
+ const all=[...view.recs,...civilians],groups=new Map();
+ for(const [unit,meta] of Object.entries(data.units)){
+  const crew=all.filter(r=>r.unit===unit),type=kind(unit),rule=state.rules[unit];
+  if(!rule&&!crew.length)continue;
+  const district=type==='Command'?'Command':type==='Rover'?'Available rovers':meta.region||'Other units';
+  if(!groups.has(district))groups.set(district,[]);
+  const seats={Lt:0,Eng:1,FF:2};
+  crew.sort((a,b)=>(seats[a.acting||a.rank]??3)-(seats[b.acting||b.rank]??3)||a.start-b.start||a.name.localeCompare(b.name));
+  const day=rule?unitDay(unit,view):null;
+  const status=rule?(rule.active?day.head+' on / '+rule.min+' min':'Out of service'):'';
+  const entries=crew.map(r=>{
+   const rank=r.acting||r.rank,role=rank==='Unknown'?'':rank;
+   return '<tr><td class="seat">'+esc(role)+'</td><td><b>'+esc(r.name)+'</b>'+(r.qual.includes('M')?' <em>PM</em>':'')+
+    '<small>'+esc(r.qual.filter(q=>q!=='M').join(' '))+'</small></td><td class="hrs">'+esc(needWhen(r.start,r.end))+'</td></tr>';
+  }).join('');
+  const needs=(day?.needs||[]).map(([k,n,start,end])=>esc((k==='seats'?'Open seats':needLabel(k))+' × '+n+' · '+needWhen(start,end))).join('<br>');
+  groups.get(district).push({unit,html:'<article><header><strong>'+esc(unit)+'</strong><span>'+esc(status)+'</span></header><table>'+entries+'</table>'+
+   (!crew.length?'<p>No assigned crew</p>':'')+(needs?'<aside>'+needs+'</aside>':'')+'</article>'});
+ }
+ const order=g=>g==='Command'?0:g==='Available rovers'?2:1;
+ const districts=[...groups.keys()].sort((a,b)=>order(a)-order(b)||a.localeCompare(b,undefined,{numeric:true}));
+ const roster=districts.map(d=>'<section><h2>'+esc(d.replace(/^D-(\d+)$/,'District $1'))+'</h2><div class="grid">'+groups.get(d).sort((a,b)=>data.units[a.unit].station.localeCompare(data.units[b.unit].station,undefined,{numeric:true})||a.unit.localeCompare(b.unit,undefined,{numeric:true})).map(x=>x.html).join('')+'</div></section>').join('');
+ const moveRows=moves.map((m,i)=>'<tr><td class="num">'+(i+1)+'</td><td><b>'+esc(m.name)+'</b>'+(proposed?'<small>'+(m.pending?'Proposed':'Approved')+'</small>':'')+(m.batch?'<small>Exchange '+esc(m.batch)+'</small>':'')+'</td><td>'+esc(m.from)+'</td><td>'+esc(m.to)+'</td><td>'+esc(m.role)+(m.rideUp?' · ride-up':'')+'</td><td>'+esc(needWhen(m.start,m.end))+'</td></tr>').join('');
+ const counts=view.bs.slice(0,-1).map(t=>unique(active(view.recs,t)).length),lo=Math.min(...counts),hi=Math.max(...counts);
+ const title='OFD Shift Roster · '+data.date;
+ return '<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>'+esc(title)+'</title><style>'+
+ ' *{box-sizing:border-box}body{margin:0 auto;max-width:1000px;padding:28px;font:14px/1.35 system-ui,sans-serif;color:#17343c;background:#fff}h1,h2,p{margin:0}.mast{padding:14px 0 12px;border-top:5px solid #006c60;border-bottom:1px solid #a9c5be}.kicker{font-size:10px;font-weight:750;letter-spacing:.16em;color:#00685b}.mast h1{font-size:30px;line-height:1.15;margin:4px 0}.meta{color:#445a61}.stats{display:flex;gap:22px;flex-wrap:wrap;margin:12px 0}.stats b{font-size:17px}.stats span{color:#475e64}h2{font-size:18px;margin:16px 0 7px;border-bottom:1px solid #9abdb4;padding-bottom:3px;break-after:avoid}.grid{display:grid;grid-template-columns:1fr 1fr;gap:9px;align-items:start}article{border:1px solid #bbcdc8;border-radius:5px;overflow:hidden;break-inside:avoid}article header{display:flex;justify-content:space-between;align-items:center;padding:5px 8px;background:#eaf3ee;color:#124f47}header span,.hrs,small{font-size:11px}.hrs{text-align:right;color:#42565b;white-space:nowrap}.seat,.num{color:#40635c;font-weight:650;width:1%}table{border-collapse:collapse;width:100%}td,th{padding:4px 7px;text-align:left;vertical-align:top;border-bottom:1px solid #e1e9e6}tr:last-child td{border-bottom:0}small{display:block;color:#556968}small:empty{display:none}em{font:700 10px system-ui;color:#096451}aside,article p{padding:5px 8px;font-size:11px}aside{color:#764712;border-top:1px solid #dcc8a6}th{background:#eaf3ee;font-size:11px}thead{display:table-header-group}.moves tr{break-inside:avoid}.moves p{margin:5px 0 10px}@media(max-width:640px){.grid{grid-template-columns:1fr}body{padding:12px}}@page{size:letter portrait;margin:.48in}@media print{body{padding:0;font-size:10pt}.grid{grid-template-columns:1fr 1fr}.moves{break-before:page}h1,h2,header,th{-webkit-print-color-adjust:exact;print-color-adjust:exact}.hrs,small,aside{font-size:8pt}}'+
+ '</style><main><div class="mast"><div class="kicker">ORLANDO FIRE DEPARTMENT · FIELD OPERATIONS</div><h1>'+(proposed?'Proposed shift roster':'Shift roster')+'</h1><p class="meta">'+esc(data.date)+' · 0800 to 0800 next day</p></div><div class="stats"><span><b>'+(lo===hi?lo:lo+'–'+hi)+'</b> on duty toward minimum</span><span><b>'+shiftMin()+'</b> minimum</span><span><b>'+moves.length+'</b> '+(proposed?'move entries':'approved move entries')+'</span></div>'+roster+
+ '<section class="moves"><div class="kicker">ORLANDO FIRE DEPARTMENT · '+esc(data.date)+'</div><h2>'+(proposed?'Moves for this plan':'Approved moves')+'</h2>'+
+ (moves.length?'<p>Entries with the same exchange ID go together.</p><table><thead><tr><th>#</th><th>Member</th><th>From</th><th>To</th><th>Seat</th><th>Hours</th></tr></thead><tbody>'+moveRows+'</tbody></table>':'<p>No approved moves recorded for this shift.</p>')+'</section></main></html>';
+}
+function exportRoster(proposed=false){
+ if(proposed&&(!autoRun.plan||planStale()))return;
+ const preview=window.open('','_blank');
+ if(!preview){note('Allow pop-ups for this site to open the roster export.');return}
+ preview.opener=null;
+ preview.document.open();
+ preview.document.write(rosterExportHTML(proposed));
+ preview.document.close();
+ preview.focus();preview.print();
+}
 function sheetPanel(){
  const sick=state.callouts||[], hours=editedAssignments(), moves=result.effectiveLog;
  const all=[...sick.map(h=>entryStatus(sickKey(h))),...hours.map(r=>entryStatus(hoursKey(r))),...moves.map(moveStatus)];
@@ -1418,7 +1465,7 @@ function sheetPanel(){
  return '<section class=card><small class=eyebrow>TELESTAFF HANDOFF · '+esc(data.date)+'</small><h2>Enter the roster in TeleStaff</h2><p>Work top to bottom: removals, then working hours, then moves. Mark each line <b>Entered</b> once it is saved in TeleStaff, and <b>Verified</b> after you check it on a refreshed roster. Review the shift shortage and remaining apparatus openings before hiring.</p>'+
  '<div class=metrics><div class=metric><small>Changes to enter</small><b>'+all.length+'</b></div><div class=metric><small>Entered</small><b>'+(count('Entered')+count('Verified'))+'</b></div><div class=metric><small>Verified</small><b>'+count('Verified')+'</b></div></div>'+
  (dirty?'<p class="warn noPrint">This roster has unsaved changes. Save it under Saved rosters before you start entering in TeleStaff.</p>':'')+
- '<div class=actions><button class=primary onclick="window.print()">Print entry sheet</button><button onclick="csv()">Download entry sheet (CSV)</button><button onclick="undo()">Undo last roster change</button></div></section>'+
+ '<div class=actions><button class=primary onclick="exportRoster()">Print roster / Save PDF</button><button onclick="window.print()">Print entry sheet</button><button onclick="csv()">Download entry sheet (CSV)</button><button onclick="undo()">Undo last roster change</button></div></section>'+
  section(1,'Removed from roster',sick.length,table(['Member','From','Through','Enter in TeleStaff','Status'],sick.map(h=>row([esc(h.name),clock(h.start),clock(h.end),'Leave or absence code on the working assignment',statusControl(sickKey(h),h.name)])).join('')),'No members removed.')+
  section(2,'Working hours',hours.length,table(['Member','Unit','Imported hours','Enter as','Status'],hours.map(r=>{const old=data.records[r.sourceIndex];return row([esc(r.name),esc(r.unit),clock(old.start)+'–'+clock(old.end),clock(r.start)+'–'+clock(r.end),statusControl(hoursKey(r),r.name)])}).join('')),'No working hour changes.')+
  section(3,'Moves',moves.length,'<p>Enter every leg of an exchange group with the same effective time.</p>'+table(['# / group','Member','From → to','Seat','From / through','Status'],moves.map((m,i)=>row([m.batch?esc((i+1)+' / '+m.batch):i+1,esc(m.name),esc(m.from+' → '+m.to),m.role,clock(m.start)+'–'+clock(m.end),entryControl(m,i)])).join('')),'No approved moves.')+
