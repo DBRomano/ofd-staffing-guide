@@ -139,8 +139,9 @@ function softChips(u){
 // Assigned lieutenants and engineers stay on their units; only floating (rover) officers are moved
 // for staffing. Exception: an engineer may move within the same station to balance paramedics.
 function sameStation(a,b){const x=data.units[a]?.station,y=data.units[b]?.station;return !!x&&x===y}
-function officerMoveOk(l,rank,needKey){
+function officerMoveOk(l,rank,needKey,crews=null){
  if(l.from===l.to||kind(l.from)==='Rover'||!['Lt','Eng'].includes(rank))return true;
+ if(crews&&rank==='Eng'&&l.role==='Eng'&&needKey==='driver'&&crews(l.from).some(r=>r.id!==l.id&&r.rank==='Eng'&&(r.acting||r.rank)==='Eng'&&eligibleSeat(l.from,r,'Eng')))return true;
  return rank==='Eng'&&(needKey==='medic'||needKey==='medicLt')&&sameStation(l.from,l.to);
 }
 function canRideUp(rank,role){return rank==='FF'&&role==='Eng'||rank==='Eng'&&role==='Lt'}
@@ -299,6 +300,7 @@ function exchangeCheck(snapshot,state,target,legs,need=null,manual=null){
  for(const m of legs){
   const r=snapshot.byId.get(m.id);
   if(!r||r.unit!==m.from||incoming.has(r.id)||!state.rules[m.to]?.active)return block('Member unavailable in this window. Check the assignment, overlapping moves, or a roster lock.');
+  if(state.preferEngineers&&!officerMoveOk(m,r.rank,need,u=>snapshot.units[u]||[]))return block('Assigned officer must stay on the unit.');
   if(!eligibleSeat(m.to,r,m.role))return block('Member lacks a required qualification for this seat.');
   if(!manual&&hireMarked(m.to,m.role,snapshot.t,state.hireMarks||[],snapshot.units[m.to]||[])&&!legs.some(x=>x.from===m.to))return block('This seat is marked for hiring.');
   if(r.rank!==m.role && !(state.pass===3&&canRideUp(r.rank,m.role)))return block('Rank is ineligible for this seat.');
@@ -312,6 +314,35 @@ function exchangeCheck(snapshot,state,target,legs,need=null,manual=null){
   if(!state.rules[u])continue;
   const crew=snapshot.units[u]||[], rule=state.rules[u], before=gapProfile(u,crew,rule), next=gapProfile(u,after,rule);
   if(fillsLastSeatWithoutMedic(crew,after,rule))return block(u+' needs a paramedic in its last seat.');
+  if(state.preferEngineers){
+   const driver=r=>(r.acting||r.rank)==='Eng'&&eligibleSeat(u,r,'Eng');
+   const engineers=after.filter(r=>driver(r)&&r.rank==='Eng');
+   // Do not spend a rover as a second driver or behind an acting FF when that
+   // Engineer can cover a driver opening elsewhere in this same time window.
+   if(after.filter(driver).length>1&&engineers.some(r=>{
+    const incoming=legs.find(l=>l.id===r.id&&l.to===u&&l.from!==u);
+    if(!incoming)return false;
+    return Object.entries(state.rules).some(([dest,destRule])=>{
+     if(dest===u||!destRule.active||autoRun.skip.includes(r.id+'>'+dest)||!eligibleSeat(dest,r,'Eng'))return false;
+     const drivers=(snapshot.units[dest]||[]).filter(c=>(c.acting||c.rank)==='Eng'&&eligibleSeat(dest,c,'Eng'));
+     if(drivers.some(c=>c.rank==='Eng'))return false;
+     if(!autoRun.fillKD&&absencePriority(snapshot.data.records,dest,'Eng',snapshot.t)===2)return false;
+     const direct={...incoming,to:dest,role:'Eng'};
+     if(!officerMoveOk(direct,r.rank,'driver',unit=>snapshot.units[unit]||[]))return false;
+     const trial={...state,pass:1,preferEngineers:false};
+     if(!drivers.length)return !!exchangeCheck(snapshot,trial,dest,[direct],'driver');
+     // A qualified FF already riding up could keep the backfill seat instead.
+     const destBefore=gapProfile(dest,snapshot.units[dest],destRule);
+     return drivers.some(c=>{
+      if(c.rank!=='FF'||state.locks.includes(c.id)||!eligibleSeat(u,c,'FF')||autoRun.protect.includes(dest)||autoRun.skip.includes(c.id+'>'+u))return false;
+      const home=gapProfile(u,after.map(m=>m.id===r.id?{...c,acting:'FF'}:m),rule);
+      const away=gapProfile(dest,snapshot.units[dest].map(m=>m.id===c.id?{...r,acting:'Eng'}:m),destRule);
+      return Object.keys(next).every(k=>home[k]<=next[k])&&Object.keys(destBefore).every(k=>away[k]<=destBefore[k]);
+     });
+    });
+   }))return block('Reserve the Engineer for a driver seat.');
+   if(engineers.length&&after.some(r=>driver(r)&&r.rank==='FF'&&legs.some(l=>l.id===r.id&&l.role==='Eng')))return block('An Engineer already covers this driver seat.');
+  }
   const benefits=[];
   if(state.preserveHolds){
    const reserved=reservedRoles(u,snapshot.t,crew,state.hireMarks).slice(0,before.seats);
@@ -620,7 +651,7 @@ function needPlans(r,sim,need,reviews=null){
   let plans=group.flatMap(p=>coordinated(data,{...sim,pass:p},r,need.u,need.start,need.key));
   if(need.key==='medic')plans=plans.concat(medicPool(data,sim,r,need.start,need.u).plans);
   const rankOf=l=>(r.recs.find(x=>x.id===l.id&&x.unit===l.from)||r.recs.find(x=>x.id===l.id))?.rank;
-  plans=plans.filter(p=>!p.legs.some(l=>autoRun.protect.includes(l.from)||autoRun.skip.includes(l.id+'>'+l.to)||!officerMoveOk(l,rankOf(l),need.key)));
+  plans=plans.filter(p=>!p.legs.some(l=>autoRun.protect.includes(l.from)||autoRun.skip.includes(l.id+'>'+l.to)||!officerMoveOk(l,rankOf(l),need.key,u=>crewAt(u,p.start,r.recs))));
   if(plans.some(p=>p.legs.some(l=>l.rideUp))){
    const unchecked=p=>p.legs.find(l=>l.rideUp&&!sim.rankEdits?.[l.id]&&r.recs.some(m=>m.id===l.id&&swapKind(m)&&m.start<p.end&&p.start<m.end));
    const preferred=rankedPlans(plans,need,r)[0],leg=unchecked(preferred);
@@ -689,11 +720,12 @@ async function compareDestinations(first,need,needs,r,sim){
  const person=first.legs[0],rank=person.role;
  const crewRec=r.recs.find(m=>m.id===person.id&&m.unit===person.from&&m.start<=first.start&&first.start<m.end);
  const choices=[];
- for(const other of [...needs].sort((a,b)=>b.roleNeeds-a.roleNeeds)){
+ const driverTier=n=>need.key==='driver'&&n.key==='driver'&&requiresL(n.u)?1:0;
+ for(const other of [...needs].sort((a,b)=>driverTier(b)-driverTier(a)||b.roleNeeds-a.roleNeeds)){
   if(other.u===need.u||other.key!==need.key||other.start>=first.end||other.end<=first.start||
      (person.rideUp&&(other.why===2)!==(need.why===2))||!eligibleSeat(other.u,crewRec,rank))continue;
   const matches=person.rideUp?needPlans(r,sim,other):coordinated(data,{...sim,pass:{Lt:0,Eng:1,FF:2}[rank]},r,other.u,other.start,other.key,person.id)
-   .filter(p=>p.legs.every(l=>!autoRun.protect.includes(l.from)&&!autoRun.skip.includes(l.id+'>'+l.to)&&officerMoveOk(l,l.role,other.key)));
+   .filter(p=>p.legs.every(l=>!autoRun.protect.includes(l.from)&&!autoRun.skip.includes(l.id+'>'+l.to)&&officerMoveOk(l,l.role,other.key,u=>crewAt(u,p.start,r.recs))));
   const best=rankedPlans(matches,other,r);
   const alt=best.find(p=>p.legs[0].id===person.id&&p.legs[0].role===rank&&rideNoP(p.legs)===rideNoP(best[0].legs));
   if(alt){choices.push({need:other,move:alt});if(choices.length===2)break}
@@ -708,6 +740,7 @@ async function compareDestinations(first,need,needs,r,sim){
   let view={...r,recs:applyMoves(r.recs,option.move.legs)},floats=stationFloats(option.move),legs=option.move.legs.length;
   // Keep all donor rules active during validation; score gaps in the contested units.
   const nextNeeds=planNeeds(view,{...trial,rules:localRules});
+  if(need.key==='driver')nextNeeds.sort((a,b)=>Number(b.key==='driver')-Number(a.key==='driver'));
   for(const next of nextNeeds){
    const follow=rankedPlans(needPlans(view,trial,next),next,view)[0];if(!follow)continue;
    trial.log.push(...follow.legs);floats+=stationFloats(follow);legs+=follow.legs.length;
@@ -716,8 +749,9 @@ async function compareDestinations(first,need,needs,r,sim){
   const gaps=planNeeds(view,{...trial,rules:localRules},true);
   const hours=items=>items.reduce((n,x)=>n+(x.end-x.start)*(x.n||1),0);
   const hires=hiringPlan(view,{...trial,rules:localRules}).seats;
+  const rideUps=trial.log.slice(sim.log.length).filter(l=>l.rideUp&&l.role==='Eng').length;
   const score=[hours(gaps.filter(x=>x.key!=='seats'&&!x.key.startsWith('team '))),hours(hires),
-   hours(hires.filter(x=>x.role==='Lt')),hours(hires.filter(x=>x.role==='Eng')),floats,legs];
+   hours(hires.filter(x=>x.role==='Lt')),hours(hires.filter(x=>x.role==='Eng')),rideUps,floats,legs];
   const difference=bestScore?score.findIndex((n,i)=>n!==bestScore[i]):-1;
   if(!bestScore||difference>=0&&score[difference]<bestScore[difference]){bestScore=score;winner=option}
  }
@@ -739,7 +773,7 @@ async function buildPlan(){
  autoRun.running=true;autoRun.rankReviews=new Map();autoRun.plan=null;autoRun.remaining=[];
  if(tab!=='Auto-build')tab='Auto-build';draw();
  const t0=performance.now(),sim=JSON.parse(JSON.stringify(state)),plan=[],tried=new Set();
- sim.pass=2;sim.skip=[];sim.preserveHolds=true;sim.hireMarks=fixedHireMarks(sim.hireMarks);
+ sim.pass=2;sim.skip=[];sim.preserveHolds=true;sim.preferEngineers=true;sim.hireMarks=fixedHireMarks(sim.hireMarks);
   sim.rules=withTeamFallback(sim.rules);
  try{
   // Needs that found no move are retried once more after other moves land, because placing extras
@@ -748,7 +782,11 @@ async function buildPlan(){
   for(let i=0;i<120;i++){
    const r=suggestions(data,sim);let placed=false;
    const needs=planNeeds(r,sim);
+   // Among driver openings at the same priority, handle seats requiring T and L first.
+   const driverOrder=needs.filter(n=>n.key==='driver').sort((a,b)=>(a.why===2)-(b.why===2)||Number(requiresL(b.u))-Number(requiresL(a.u)));
+   let driverIndex=0;
    for(let need of needs){
+    if(need.key==='driver')need=driverOrder[driverIndex++];
     const key=need.u+'|'+need.key+'|'+need.start;if(tried.has(key))continue;
     setAutoProgress('Move '+(plan.length+1)+' · '+need.u+' needs '+needText(need)+'…');
     await new Promise(res=>setTimeout(res));
@@ -807,7 +845,7 @@ function approvePlan(){
 }
 // One item can be approved alone only if it is valid against the roster as it stands now.
 function planItemValid(item){
- const st={...state,hireMarks:fixedHireMarks(state.hireMarks),pass:3,preserveHolds:true,rules:withTeamFallback(item.need.soft?prefRules(state.rules):state.rules)},ts=[item.start,...result.bs.filter(t=>item.start<t&&t<item.end)];
+ const st={...state,hireMarks:fixedHireMarks(state.hireMarks),pass:3,preserveHolds:true,preferEngineers:true,rules:withTeamFallback(item.need.soft?prefRules(state.rules):state.rules)},ts=[item.start,...result.bs.filter(t=>item.start<t&&t<item.end)];
  return ts.every(t=>!!exchangeCheck(exchangeSnapshot(data,st,result,t),st,item.need.u,item.legs,item.need.key==='medic'?null:item.need.key));
 }
 function approvePlanItem(i){

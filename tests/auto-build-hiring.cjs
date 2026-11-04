@@ -87,3 +87,43 @@ test('trade ride-up waits for confirmation of the imported rank', async () => {
     assert.equal(run("autoRun.plan.flatMap(p => p.legs).some(l => l.id === 'trade' && l.role === 'Lt')"), true);
   }
 });
+
+test('an extra qualified Engineer can cover another tower without taking its assigned driver', async () => {
+  const run = planner([
+    member('officer one', 'Tower 1', 'Lt', 'LM'),
+    member('driver one', 'Tower 1', 'Eng', 'LT'),
+    member('extra engineer', 'Tower 1', 'Eng', 'LT'),
+    member('officer eight', 'Tower 8', 'Lt', 'LM'),
+    member('relief FF', 'Tower 8', 'FF', 'LTP')
+  ], 5);
+  run("for (const r of Object.values(state.rules)) { r.min=2; r.team='' }");
+  await run('buildPlan()');
+  assert.ok(run("autoRun.plan.some(p=>p.legs.some(l=>l.from==='Tower 1' && l.to==='Tower 8' && l.role==='Eng' && !l.rideUp))"));
+  assert.equal(run("autoRun.plan.some(p=>p.legs.some(l=>l.id==='relief FF' && l.rideUp))"), false);
+});
+
+test('an Engineer without tower driver qualifications does not block a qualified FF from driving', async () => {
+  const run = planner([
+    member('rover', 'DIV1 Rovers', 'Eng', 'E'),
+    member('officer', 'Tower 8', 'Lt', 'LM'),
+    member('relief FF', 'Tower 8', 'FF', 'LT')
+  ], 3);
+  run("state.rules['Tower 8'].min=2;state.rules['Tower 8'].team=''");
+  await run('buildPlan()');
+  assert.ok(run("autoRun.plan.some(p=>p.legs.some(l=>l.id==='relief FF' && l.rideUp))"));
+});
+
+test('keep an eligible rover out of a second driver position when a different tower needs a driver', () => {
+  const run = planner([
+    member('officer one', 'Tower 1', 'Lt', 'LM'), member('driver one', 'Tower 1', 'Eng', 'LT'),
+    member('relief medic', 'Tower 1', 'FF', 'ELM'), member('rover', 'DIV1 Rovers', 'Eng', 'LT'),
+    member('EMT', 'Rescue 1', 'FF', ''), member('officer eight', 'Tower 8', 'Lt', 'LM')
+  ], 6);
+  run("for(const rule of Object.values(state.rules)) rule.team='';state.rules['Tower 1'].min=3;state.rules['Tower 8'].min=2");
+  run(`const sim={...state,pass:3,preferEngineers:true};
+       const snap=exchangeSnapshot(data,sim,result,0);
+       const linked=[{id:'relief medic',from:'Tower 1',to:'Rescue 1',role:'Eng',rideUp:true},
+                     {id:'rover',from:'DIV1 Rovers',to:'Tower 1',role:'Eng'}];`);
+  assert.ok(run("exchangeCheck(snap,{...sim,preferEngineers:false},'Rescue 1',linked,'driver')"));
+  assert.equal(run("exchangeCheck(snap,sim,'Rescue 1',linked,'driver')"),null);
+});
