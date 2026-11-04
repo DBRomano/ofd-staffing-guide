@@ -589,8 +589,9 @@ function planNeeds(r,sim,all=false){
    for(const [k,n] of Object.entries(g)){
     if(!n){last.delete(k);continue}
     const held=(sim.hireMarks||[]).length?reservedRoles(u,t,crewAt(u,t,r.recs),sim.hireMarks).join('|'):'',why=absencePriority(r.planningData.records,u,needRole[k],t);
-    const p=last.get(k);if(p&&p.end===t&&p.n===n&&p.held===held&&p.why===why){p.end=e;continue}
-    const need={u,key:k,n,start:t,end:e,held,why};out.push(need);last.set(k,need);
+    const rescueDriverMedic=k==='driver'&&/^Rescue \d+$/.test(u)&&g.medic>0;
+    const p=last.get(k);if(p&&p.end===t&&p.n===n&&p.held===held&&p.why===why&&p.rescueDriverMedic===rescueDriverMedic){p.end=e;continue}
+    const need={u,key:k,n,start:t,end:e,held,why,rescueDriverMedic};out.push(need);last.set(k,need);
    }
   }
  }
@@ -598,7 +599,7 @@ function planNeeds(r,sim,all=false){
  return out
   .filter(x=>all||!(x.key==='seats'?held(x).length>=x.n:needRole[x.key]&&held(x).includes(needRole[x.key])))
   .filter(x=>all||autoRun.fillKD||x.why!==2)
-  .sort((a,b)=>(a.why===2)-(b.why===2)||kindRank(a)-kindRank(b)||a.why-b.why||a.start-b.start||a.u.localeCompare(b.u,undefined,{numeric:true}));
+  .sort((a,b)=>(a.why===2)-(b.why===2)||kindRank(a)-kindRank(b)||Number(b.rescueDriverMedic)-Number(a.rescueDriverMedic)||a.why-b.why||a.start-b.start||a.u.localeCompare(b.u,undefined,{numeric:true}));
 }
 function needPlans(r,sim,need){
  const groups=need.key==='officer'?[[0],[3]]:need.key==='driver'?[[1],[3]]:[[2,1,0]];
@@ -625,6 +626,13 @@ function rankedPlans(plans,need,r=result){
 async function chooseRequired(plans,need,needs,r,sim){
  const ranked=rankedPlans(plans,need,r),first=ranked[0];
  if(!first||ranked.length===1||need.key.startsWith('team '))return first;
+ // Use an available Engineer/PM for both rescue needs before considering a medic exchange.
+ const direct=need.rescueDriverMedic&&ranked.find(p=>{
+  if(p.legs.length!==1||p.legs[0].rideUp||p.legs[0].role!=='Eng'||p.legs[0].to!==need.u||Math.min(p.end,need.end)<Math.min(first.end,need.end))return false;
+  const move=p.legs[0],member=r.recs.find(m=>m.id===move.id&&m.unit===move.from&&m.start<=p.start&&p.start<m.end);
+  return member?.rank==='Eng'&&member.qual.includes('M');
+ });
+ if(direct)return direct;
  const future=needs.filter(x=>x.u!==need.u&&x.key!=='seats'&&x.start<first.end&&first.start<x.end)
   .filter((x,i,a)=>a.findIndex(y=>y.u===x.u)===i).slice(0,2);
  if(!future.length)return first;
