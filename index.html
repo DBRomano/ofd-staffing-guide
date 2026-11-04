@@ -589,9 +589,9 @@ function planNeeds(r,sim,all=false){
    for(const [k,n] of Object.entries(g)){
     if(!n){last.delete(k);continue}
     const held=(sim.hireMarks||[]).length?reservedRoles(u,t,crewAt(u,t,r.recs),sim.hireMarks).join('|'):'',why=absencePriority(r.planningData.records,u,needRole[k],t);
-    const rescueDriverMedic=k==='driver'&&/^Rescue \d+$/.test(u)&&g.medic>0;
-    const p=last.get(k);if(p&&p.end===t&&p.n===n&&p.held===held&&p.why===why&&p.rescueDriverMedic===rescueDriverMedic){p.end=e;continue}
-    const need={u,key:k,n,start:t,end:e,held,why,rescueDriverMedic};out.push(need);last.set(k,need);
+    const roleNeeds=Object.entries(g).filter(([key,n])=>n&&key!=='seats'&&!key.startsWith('team ')).length;
+    const p=last.get(k);if(p&&p.end===t&&p.n===n&&p.held===held&&p.why===why&&p.roleNeeds===roleNeeds){p.end=e;continue}
+    const need={u,key:k,n,start:t,end:e,held,why,roleNeeds};out.push(need);last.set(k,need);
    }
   }
  }
@@ -599,7 +599,7 @@ function planNeeds(r,sim,all=false){
  return out
   .filter(x=>all||!(x.key==='seats'?held(x).length>=x.n:needRole[x.key]&&held(x).includes(needRole[x.key])))
   .filter(x=>all||autoRun.fillKD||x.why!==2)
-  .sort((a,b)=>(a.why===2)-(b.why===2)||kindRank(a)-kindRank(b)||Number(b.rescueDriverMedic)-Number(a.rescueDriverMedic)||a.why-b.why||a.start-b.start||a.u.localeCompare(b.u,undefined,{numeric:true}));
+  .sort((a,b)=>(a.why===2)-(b.why===2)||kindRank(a)-kindRank(b)||a.why-b.why||a.start-b.start||b.roleNeeds-a.roleNeeds||a.u.localeCompare(b.u,undefined,{numeric:true}));
 }
 function needPlans(r,sim,need){
  const groups=need.key==='officer'?[[0],[3]]:need.key==='driver'?[[1],[3]]:[[2,1,0]];
@@ -613,6 +613,9 @@ function needPlans(r,sim,need){
  }
  return [];
 }
+function stationFloats(p){
+ return p.legs.filter(l=>kind(l.from)==='Apparatus'&&l.from!==l.to&&!sameStation(l.from,l.to)).length;
+}
 function rankedPlans(plans,need,r=result){
  // Legs that take a team member from a unit already at or below its preferred count for that letter.
  const medicHit=p=>p.legs.filter(l=>{if(l.from===l.to||!state.rules[l.from])return false;const m=data.records.find(x=>x.id===l.id);if(!m?.qual.includes('M'))return false;const crew=crewAt(l.from,p.start,r.recs).filter(c=>c.id!==l.id);return crew.some(c=>c.qual.includes('M'))&&crew.filter(c=>c.qual.includes('M')).every(c=>(c.acting||c.rank)==='Lt')}).length;
@@ -620,19 +623,12 @@ function rankedPlans(plans,need,r=result){
  const cover=p=>Math.min(p.end,need.end)-Math.max(p.start,need.start),ride=p=>p.legs.filter(l=>l.rideUp).length;
  const dist=p=>p.legs.reduce((n,l)=>n+districtCost(data,l.from,l.to),0),rover=p=>kind(p.legs[0].from)==='Rover'?0:1;
  const lower=p=>need.key.startsWith('team ')&&!crewAt(p.legs[0].from,p.start,r.recs).find(m=>m.id===p.legs[0].id)?.qual.includes(need.key.slice(5))?1:0;
- return plans.slice().sort((a,b)=>lower(a)-lower(b)||ride(a)-ride(b)||rideNoP(a.legs)-rideNoP(b.legs)||cover(b)-cover(a)||a.legs.length-b.legs.length||prefHit(a)+medicHit(a)-prefHit(b)-medicHit(b)||dist(a)-dist(b)||rover(a)-rover(b)||b.gain-a.gain);
+ return plans.slice().sort((a,b)=>lower(a)-lower(b)||ride(a)-ride(b)||rideNoP(a.legs)-rideNoP(b.legs)||cover(b)-cover(a)||b.gain-a.gain||stationFloats(a)-stationFloats(b)||a.legs.length-b.legs.length||prefHit(a)+medicHit(a)-prefHit(b)-medicHit(b)||dist(a)-dist(b)||rover(a)-rover(b));
 }
 // Compare legal first moves against the next overlapping required openings.
 async function chooseRequired(plans,need,needs,r,sim){
  const ranked=rankedPlans(plans,need,r),first=ranked[0];
  if(!first||ranked.length===1||need.key.startsWith('team '))return first;
- // Use an available Engineer/PM for both rescue needs before considering a medic exchange.
- const direct=need.rescueDriverMedic&&ranked.find(p=>{
-  if(p.legs.length!==1||p.legs[0].rideUp||p.legs[0].role!=='Eng'||p.legs[0].to!==need.u||Math.min(p.end,need.end)<Math.min(first.end,need.end))return false;
-  const move=p.legs[0],member=r.recs.find(m=>m.id===move.id&&m.unit===move.from&&m.start<=p.start&&p.start<m.end);
-  return member?.rank==='Eng'&&member.qual.includes('M');
- });
- if(direct)return direct;
  const future=needs.filter(x=>x.u!==need.u&&x.key!=='seats'&&x.start<first.end&&first.start<x.end)
   .filter((x,i,a)=>a.findIndex(y=>y.u===x.u)===i).slice(0,2);
  if(!future.length)return first;
@@ -649,19 +645,20 @@ async function chooseRequired(plans,need,needs,r,sim){
   await new Promise(resolve=>setTimeout(resolve));
   continuations.push(rankedPlans(needPlans(r,sim,target),target,r));
  }
- let winner=first,highest=-1,kept=[];
+ let winner=first,highest=-1,fewestFloats=Infinity,kept=[];
  for(const p of choices){
   const used=[p],overlaps=(a,b)=>a.start<b.end&&b.start<a.end;
-  let score=0;
+  let score=p.gain*(Math.min(p.end,need.end)-need.start);
   for(const [i,target] of future.entries()){
    // Independent crews and members can carry out both already-validated moves.
    // Shared apparatus could need a new backfill; leave those cases to the normal rebuild.
    const next=continuations[i].find(option=>used.every(prior=>!overlaps(prior,option)||
     prior.legs.every(a=>option.legs.every(b=>a.id!==b.id&&
      [a.from,a.to].every(u=>kind(u)==='Rover'||u!==b.from&&u!==b.to)))));
-   if(next){used.push(next);score+=Math.min(next.end,target.end)-Math.max(next.start,target.start)}
+   if(next){used.push(next);score+=next.gain*(Math.min(next.end,target.end)-Math.max(next.start,target.start))}
   }
-  if(score>highest){highest=score;winner=p;kept=used.slice(1).map(x=>x.legs[0].to)}
+  const floats=used.reduce((n,move)=>n+stationFloats(move),0);
+  if(score>highest||score===highest&&floats<fewestFloats){highest=score;fewestFloats=floats;winner=p;kept=used.slice(1).map(x=>x.legs[0].to)}
  }
  return winner===first?first:{...winner,lookahead:kept.join(', ')};
 }
