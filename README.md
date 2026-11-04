@@ -7,6 +7,7 @@ A job aid for the staffing officer: build the shift roster here, then enter it i
 ## What it does
 
 - Imports the TeleStaff **Roster Report** XLSX for one shift (0800 to 0800).
+- **Open FOB PDF** reads the text-based, landscape OFD roster. Review DIV1 rovers and ORSA exclusions, then use the PDF as a starting roster or compare it with a same-date roster and its approved moves. The rank code supplies EMT/paramedic status. A separate qualification letter P supplies ride-up priority.
 - Shows every unit's crew, open seats and needs (officer, driver, paramedic, team letters, L).
 - **Auto-build** works out a whole-shift plan in one click: officer, driver, paramedic and team needs first, then open seats, Kelly Day openings last, using the fewest moves and never leaving a new gap on the unit a member comes from. Approve all of it, one move at a time, or skip moves and rebuild.
 - Suggests moves and exchanges between units, including ride-ups (an engineer as lieutenant, a firefighter with E or T as driver). Kelly Day openings are suggested last.
@@ -21,7 +22,7 @@ A job aid for the staffing officer: build the shift roster here, then enter it i
 
 ## Data and privacy
 
-- Everything runs in the browser. The page makes no network requests, and the roster file is never uploaded.
+- Everything runs in the browser. The browser loads the PDF reader from this site. Roster files stay on the device.
 - Saved rosters are kept in that browser on that device. Use **Download backup** to keep a copy or hand a roster to someone else.
 - The built-in examples use anonymized members.
 
@@ -33,7 +34,7 @@ A job aid for the staffing officer: build the shift roster here, then enter it i
 
 ## Updating
 
-The whole app is `index.html`. Replace it and push to `main`; GitHub Pages republishes within a minute or two. Saved rosters stay because the address doesn't change.
+Keep `index.html`, `fob-roster.mjs` and `vendor/` together on the web host. PDF support uses the bundled Mozilla PDF.js 5.6.205 reader and worker under the license in `vendor/LICENSE`. GitHub Pages publishes from `main`. Saved rosters stay because the address doesn't change.
 
 ## Hosting setup (once)
 
