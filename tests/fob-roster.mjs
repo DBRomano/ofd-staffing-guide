@@ -29,3 +29,11 @@ test('apply complementary partial trades and carry unit over column break',()=>{
    ['Rescue 1','STW',0,720],['Rescue 1','REG',720,1440]]);
  assert.deepEqual(pdf.records.at(-1).qual,['P','M']);
 });
+
+test('partial vacation on a DIV1 member removes only the printed exception hours',()=>{
+ const d=parseFOB([[header,section(55,'DIV1'),cell(18,70,'LTP'),cell(40.32,70,'A Example'),cell(108,70,'Ab Dh L S T'),cell(189,70,'8:00 20:00 VAC')]]);
+ assert.deepEqual(d.records.map(r=>[r.name,r.rank,r.code,r.start,r.end]),[
+  ['A Example','Lt','VAC',0,720],['A Example','Lt','REG',720,1440]]);
+ assert.deepEqual(d.records[1].qual,['A','b','D','h','L','S','T','M']);
+ assert.deepEqual(d.fob.rovers,['A Example (2000–0800)']);
+});
