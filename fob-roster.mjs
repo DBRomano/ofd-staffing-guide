@@ -35,19 +35,24 @@ export function parseFOB(pages, knownUnits={}) {
           continue;
         }
         if(first.x<21){
-          const name=line.filter(t=>t.x>=40&&t.x<116).map(t=>t.s).join(' ');
+          const name=line.filter(t=>t.x>=40&&t.x<100).map(t=>t.s).join(' ');
           if(!name){unit='';last=null;warnings.add('Review unrecognized heading: '+label);continue}
           if(!unit)throw Error('Member outside a recognized unit on page '+(page+1)+': '+name);
           if(unit==='ORSA'){excluded.add(name);last=null;continue}
           if(!ranks[label]&&!/^(AC|DC|CV)[A-Z]*$/.test(label))throw Error('Review unrecognized rank '+label+' for '+name);
-          const qual=[...new Set(line.filter(t=>t.x>=116&&t.x<186).map(t=>t.s).join('').replace(/[^A-Za-z]/g,'').replace(/M/g,''))];
+          const qual=[...new Set(line.filter(t=>t.x>=100&&t.x<186).map(t=>t.s).join('').replace(/[^A-Za-z]/g,'').replace(/M/g,''))];
           if(['ENP','LTP','FFP','CVP','DCP','ACPM'].includes(label))qual.push('M');
-          last={unit,name,rank:ranks[label]||'Unknown',qual,plus:[],minus:[]};members.push(last);
-          if(unit==='DIV1 Rovers')rovers.add(name);
+          last={unit,name,rankCode:label,rank:ranks[label]||'Unknown',qual,plus:[],minus:[]};members.push(last);
         }
         if(!last)continue;
         const times=text.match(/\b\d{1,2}:\d{2}\b/g)||[];
-        if(/\bTS-(?:\s|$)/.test(text))last.minus.push(...intervals(times));
+        const side=line.filter(t=>t.x>=180).map(t=>t.s).join(' ');
+        if(side&&times.length){
+          const code=side.trim().split(/\s+/).at(-1).toUpperCase();
+          const offCode=code==='TS-'?'STO':code;
+          if(!['STO','VAC','SICKEX','SICKEXU','PERLV','MILLV','KD'].includes(offCode))throw Error('Unrecognized timed exception for '+last.name+': '+side);
+          last.minus.push(...intervals(times).map(([a,b])=>[a,b,offCode]));
+        }
         else if(label==='TS+'||label==='OT'){
           const code=label==='OT'?'OT':'STW';
           last.plus.push(...intervals(times).map(([a,b])=>[a,b,code]));
@@ -56,26 +61,40 @@ export function parseFOB(pages, knownUnits={}) {
       }
     }
   }
+  const grades=new Map();
+  for(const m of members){
+    const key=m.name.toLowerCase();
+    if(!grades.has(key))grades.set(key,new Set());
+    grades.get(key).add(m.rankCode);
+  }
   const records=[];
   for(const m of members){
+    const sharedName=grades.get(m.name.toLowerCase()).size>1;
+    if(sharedName)warnings.add('Verify members with the same printed name: '+m.name+'. Listed separately by printed rank code.');
     const spans=m.plus.length?m.plus:[[0,1440,'REG']];
-    const points=[...new Set([0,1440,...spans.flatMap(s=>s.slice(0,2)),...m.minus.flat()])].sort((a,b)=>a-b);
+    const points=[...new Set([0,1440,...spans.flatMap(s=>s.slice(0,2)),...m.minus.flatMap(s=>s.slice(0,2))])].sort((a,b)=>a-b);
     for(let i=1;i<points.length;i++){
       const start=points[i-1],end=points[i],on=spans.find(([a,b])=>a<=start&&start<b);
-      const off=m.minus.some(([a,b])=>a<=start&&start<b);
+      const off=m.minus.find(([a,b])=>a<=start&&start<b);
       if(!off&&!on)continue;
-      records.push({unit:m.unit,id:'fob-'+m.name.toLowerCase(),name:m.name,rank:m.rank,qual:m.qual,inferred:false,
-        code:off?'STO':on[2],start,end,reportedHours:(end-start)/60,sourceFrom:(start+480)%1440,sourceThrough:(end+480)%1440});
+      records.push({unit:m.unit,id:'fob-'+m.name.toLowerCase()+(sharedName?'@'+m.rankCode:''),name:m.name,rank:m.rank,qual:m.qual,inferred:false,
+        code:off?off[2]:on[2],start,end,reportedHours:(end-start)/60,sourceFrom:(start+480)%1440,sourceThrough:(end+480)%1440});
     }
   }
   if(!records.some(r=>r.rank!=='Unknown'))throw Error('No field personnel found in the FOB roster.');
   if(summary)warnings.add('Leave totals on the summary page do not identify apparatus vacancies. Review Kelly Day hiring holds.');
   // An abbreviated name cannot safely identify two people working simultaneously.
   const byId=new Map();
-  for(const r of records.filter(r=>r.code!=='STO')){
+  for(const r of records.filter(r=>['REG','OT','STW'].includes(r.code))){
     const prev=byId.get(r.id)||[];
     if(prev.some(p=>p.start<r.end&&r.start<p.end))throw Error('Overlapping entries for '+r.name+'. Use the TeleStaff XLSX to resolve identity or hours.');
     prev.push(r);byId.set(r.id,prev);
+  }
+  for(const rows of byId.values()){
+    const duty=rows.filter(r=>r.unit==='DIV1 Rovers');if(!duty.length)continue;
+    const time=n=>String((8+Math.floor(n/60))%24).padStart(2,'0')+String(n%60).padStart(2,'0');
+    const full=duty.length===1&&duty[0].start===0&&duty[0].end===1440;
+    rovers.add(duty[0].name+(full?'':' ('+duty.map(r=>time(r.start)+'–'+time(r.end)).join(', ')+')'));
   }
   return {date:date[1].padStart(2,'0')+'/'+date[2].padStart(2,'0')+'/'+date[3],units,records,warnings:[...warnings],fob:{rovers:[...rovers],excluded:[...excluded]}};
 }
