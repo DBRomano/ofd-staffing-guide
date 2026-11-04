@@ -916,7 +916,7 @@ function reviewApproval(text,moves){
 function acceptMove(i){const m=result.candidates[i];if(!m)return;
  const text=m.name+' • '+m.from+' → '+m.to+' • '+clock(m.start)+'–'+clock(m.end)+'\n'+[...m.review,'Confirm local seat authorization, specialty staffing and availability for this interval.'].join('\n');
  reviewApproval(text,[m])}
-function gapPanel(){return openingBoard()+'<div class=card><h2>Unresolved coverage at '+clock(at)+'</h2><p class=muted>On towers, Hazmat 1 and Heavy Rescue 1, everyone needs L and the driver, engineer or firefighter, needs T. On engines and rescues the driver is an engineer or a firefighter with E. Chief and civilian units are outside apparatus gap checks.</p>'+table(['Unit','Seats short','Officer needed','Driver needed','Medic needed','Missing L','Paid team missing'],gapsAt(at).map(g=>row([esc(g.to),g.seats,g.officer,g.driver,g.medic,g.missingL,g.team])).join('')||row(['No gaps at this time','','','','','','']))+'</div>'}
+function gapPanel(){return openingBoard()+'<div class=card><h2>Unresolved coverage at '+clock(at)+'</h2><p class=muted>Towers, Hazmat 1 and Heavy Rescue 1 require L for all crew members and T for the driver (Eng or FF). Engines and rescues require an Eng or an E-qualified FF to drive. Gap checks exclude chief and civilian units.</p>'+table(['Unit','Seats short','Officer needed','Driver needed','Medic needed','Missing L','Paid team missing'],gapsAt(at).map(g=>row([esc(g.to),g.seats,g.officer,g.driver,g.medic,g.missingL,g.team])).join('')||row(['No gaps at this time','','','','','','']))+'</div>'}
 let rosterExchange=null;
 function previewOnRoster(i,isSwap){
  const p=isSwap?swapOptions[i]:result.candidates[i];if(!p)return;
