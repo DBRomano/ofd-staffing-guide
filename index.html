@@ -116,6 +116,9 @@ function rideNoP(legs){return legs.some(l=>l.rideUp&&!hasP(l.id))?1:0}
 // extras and swaps only, never by hiring.
 function prefOf(rule){return rule?.pref??4}
 function prefRules(rules){return Object.fromEntries(Object.entries(rules).map(([u,r])=>[u,{...r,softMedic:true,...(r.team?{paid:Math.max(r.paid,prefOf(r))}:{})}]))}
+function withTeamFallback(rules){
+ return Object.fromEntries(Object.entries(rules).map(([u,rule])=>[u,{...rule,teamFallback:true}]));
+}
 function softNeeds(u){
  const rule=state.rules[u];if(!rule?.active)return [];
  const out=[],last=new Map(),ts=fullView()?result.bs.slice(0,-1).map((t,i)=>[t,result.bs[i+1]]):[[at,result.bs.find(t=>t>at)??shiftEnd]];
@@ -203,7 +206,7 @@ function suggestions(data,state){
  const effectiveLog=applyCallouts(plan,state.callouts);
  const edits=new Map((state.hourEdits||[]).map(e=>[e.index,e]));
  const ranks=state.rankEdits||{};
- const assignments=data.records.map((r,sourceIndex)=>{const e=edits.get(sourceIndex);return {...r,sourceIndex,start:e?.start??r.start,end:e?.end??r.end,...(ranks[r.id]?{rank:ranks[r.id]}:{})}});
+ const assignments=data.records.map((r,sourceIndex)=>{const e=edits.get(sourceIndex);return {...r,sourceIndex,start:e?.start??r.start,end:e?.end??r.end,...(ranks[r.id]?{rank:ranks[r.id],inferred:false}:{})}});
  data={...data,records:applyCallouts(assignments,state.callouts,true)};
  let recs=projected(data,effectiveLog),bs=[...new Set([...bounds(data,recs),...(state.callouts||[]).flatMap(x=>[x.start,x.end]),...(state.hireMarks||[]).flatMap(x=>[x.start,x.end])])].sort((a,b)=>a-b),byMove=new Map(),pass=state.pass,issues=[];
  for(let k=0;k<bs.length-1;k++){
@@ -275,7 +278,11 @@ function exchangeSnapshot(data,state,result,t,manualMemberId=null){
 }
 function gapProfile(u,crew,rule){
  const g=gaps(u,crew,rule);delete g.team;
- for(const q of new Set(rule.team))g['paid '+q]=Math.max(0,rule.paid-unique(crew).filter(r=>r.qual.includes(q)).length);
+ for(const q of new Set(rule.team)){
+  const members=unique(crew);
+  g['paid '+q]=Math.max(0,rule.paid-members.filter(r=>r.qual.includes(q)).length);
+  if(rule.teamFallback)g['team '+q]=Math.max(0,rule.paid-members.filter(r=>r.qual.includes(q)||r.qual.includes(q.toLowerCase())).length);
+ }
  // Preferred, not required: a paramedic other than the lieutenant. Only counted with the soft (preferred) rules.
  if(rule.softMedic&&!g.medic)g.medicLt=+!unique(crew).some(r=>r.qual.includes('M')&&(r.acting||r.rank)!=='Lt');
  return g;
@@ -379,7 +386,9 @@ function coordinated(data,state,result,target,at,need=null){
    if(r.unit===target){evaluations++;emit([...legs,m])}else extend([...legs,m]);
   }
  }
- for(depth=2;depth<=3;depth++)for(const r of eligibleFor(target)){
+ const targetPool=eligibleFor(target).slice();
+ if(state.pass===3)targetPool.sort((a,b)=>Number(b.qual.includes('P'))-Number(a.qual.includes('P')));
+ for(depth=2;depth<=3;depth++)for(const r of targetPool){
   if(evaluations>5500)break;
   // In the ride-up pass a qualified FF already on the crew may move up to the driver seat.
   if(r.unit===target&&state.pass!==3||(state.pass===3?!canRideUp(r.rank,role):r.rank!==role))continue;
@@ -569,7 +578,7 @@ function draw(){rosterExchange=null;renderSaved();swapOptions=[];result=suggesti
 let autoRun={plan:null,remaining:[],marks:[],sig:'',running:false,ms:0,protect:[],skip:[],rideUps:true,fillKD:true};
 const autoKind={officer:0,driver:1,medic:2,missingL:4,seats:5};
 // Among Kelly Day openings, firefighters riding up to engineer come before engineers riding up to lieutenant.
-const kindRank=x=>x.why===2&&x.key==='officer'?1.5:(autoKind[x.key]??3);
+const kindRank=x=>x.key.startsWith('team ')?3.5:x.why===2&&x.key==='officer'?1.5:(autoKind[x.key]??3);
 function autoSig(){return JSON.stringify([state.log,state.callouts||[],state.hourEdits||[],state.locks,state.rules,state.hireMarks||[],state.minimum,state.rankEdits,autoRun.protect,autoRun.rideUps,autoRun.fillKD])}
 function planNeeds(r,sim,all=false){
  const out=[],windows=r.bs.slice(0,-1).map((t,i)=>[t,r.bs[i+1]]);
@@ -609,17 +618,19 @@ function rankedPlans(plans,need,r=result){
  const prefHit=p=>p.legs.filter(l=>{const ru=state.rules[l.from];if(!ru?.team)return false;const m=data.records.find(x=>x.id===l.id);return [...new Set(ru.team)].some(q=>m?.qual.includes(q)&&crewAt(l.from,p.start,r.recs).filter(c=>c.qual.includes(q)).length<=prefOf(ru))}).length;
  const cover=p=>Math.min(p.end,need.end)-Math.max(p.start,need.start),ride=p=>p.legs.filter(l=>l.rideUp).length;
  const dist=p=>p.legs.reduce((n,l)=>n+districtCost(data,l.from,l.to),0),rover=p=>kind(p.legs[0].from)==='Rover'?0:1;
- return plans.slice().sort((a,b)=>ride(a)-ride(b)||rideNoP(a.legs)-rideNoP(b.legs)||cover(b)-cover(a)||a.legs.length-b.legs.length||prefHit(a)+medicHit(a)-prefHit(b)-medicHit(b)||dist(a)-dist(b)||rover(a)-rover(b)||b.gain-a.gain);
+ const lower=p=>need.key.startsWith('team ')&&!crewAt(p.legs[0].from,p.start,r.recs).find(m=>m.id===p.legs[0].id)?.qual.includes(need.key.slice(5))?1:0;
+ return plans.slice().sort((a,b)=>lower(a)-lower(b)||ride(a)-ride(b)||rideNoP(a.legs)-rideNoP(b.legs)||cover(b)-cover(a)||a.legs.length-b.legs.length||prefHit(a)+medicHit(a)-prefHit(b)-medicHit(b)||dist(a)-dist(b)||rover(a)-rover(b)||b.gain-a.gain);
 }
 // Compare legal first moves against the next overlapping required openings.
 async function chooseRequired(plans,need,needs,r,sim){
  const ranked=rankedPlans(plans,need,r),first=ranked[0];
- if(!first||ranked.length===1)return first;
+ if(!first||ranked.length===1||need.key.startsWith('team '))return first;
  const future=needs.filter(x=>x.u!==need.u&&x.key!=='seats'&&x.start<first.end&&first.start<x.end)
   .filter((x,i,a)=>a.findIndex(y=>y.u===x.u)===i).slice(0,2);
  if(!future.length)return first;
  const moves=new Set(),choices=[];
  for(const p of ranked){
+  if(rideNoP(p.legs)!==rideNoP(first.legs))continue;
   if(Math.min(p.end,need.end)<Math.min(first.end,need.end)||moves.has(p.legs[0].id))continue;
   moves.add(p.legs[0].id);choices.push(p);
   if(choices.length===4)break;
@@ -652,7 +663,7 @@ function planReason(need,legs,r){
  const crew=u=>unique(active(r.recs,need.start).filter(x=>x.unit===u)).length;
  const src=m.from===m.to?'already on the crew':kind(m.from)==='Rover'?'a rover':legs.length>1?'from '+m.from:'from '+m.from+', which can spare a member ('+crew(m.from)+' on, minimum '+state.rules[m.from]?.min+')';
  const how=m.rideUp?(m.role==='Lt'?'rides up to lieutenant':'rides up to driver'+(rec?.qual.includes('T')&&requiresL(m.to)?' (T)':rec?.qual.includes('E')?' (E)':'')):'';
- const has=[m.rideUp&&hasP(m.id)?'has P':'',need.key==='medic'?'has M':need.key.startsWith('paid ')?'has '+need.key.slice(5):need.key==='missingL'?'has L':''].filter(Boolean).join(', ');
+ const has=[need.key.startsWith('team ')?'provides specialty coverage ('+(rec?.qual.includes(need.key.slice(5))?need.key.slice(5):need.key.slice(5).toLowerCase())+')':'',m.rideUp&&hasP(m.id)?'has P':'',need.key==='medic'?'has M':need.key.startsWith('paid ')?'has '+need.key.slice(5):need.key==='missingL'?'has L':''].filter(Boolean).join(', ');
  return need.u+' needs '+needText(need)+' ('+cause+'). '+m.name+' is '+src+[how,has].filter(Boolean).map(x=>', '+x).join('')+(districtCost(data,m.from,m.to)===0?', same district.':districtCost(data,m.from,m.to)===1?', cross-district.':'.')+legs.slice(1).map(l=>' '+l.name+' backfills '+l.to+' from '+l.from+'.').join('');
 }
 function setAutoProgress(text){const el=$('autoProgress');if(el)el.textContent=text}
@@ -662,6 +673,7 @@ async function buildPlan(){
  if(tab!=='Auto-build')tab='Auto-build';draw();
  const t0=performance.now(),sim=JSON.parse(JSON.stringify(state)),plan=[],tried=new Set();
  sim.pass=2;sim.skip=[];
+  sim.rules=withTeamFallback(sim.rules);
  try{
   // Needs that found no move are retried once more after other moves land, because placing extras
   // can make a ride-up possible (the extra fills the seat the rider leaves).
@@ -688,22 +700,22 @@ async function buildPlan(){
   const soft={...sim,rules:prefRules(sim.rules)};tried.clear();
   for(let i=0;i<40;i++){
    const r=suggestions(data,sim);let placed=false;
-   for(const need of planNeeds(r,soft).filter(x=>x.key.startsWith('paid ')||x.key==='medicLt')){
+   for(const need of planNeeds(r,soft).filter(x=>x.key.startsWith('paid ')||x.key.startsWith('team ')||x.key==='medicLt')){
     const key=need.u+'|'+need.key+'|'+need.start;if(tried.has(key))continue;
     setAutoProgress('Team strength · '+need.u+' '+needLabel(need.key)+'…');
     await new Promise(res=>setTimeout(res));
     const best=rankedPlans(needPlans(r,soft,need),need,r)[0];
     if(!best){tried.add(key);continue}
     const legs=best.legs.map(l=>({...l,start:best.start,end:best.end})),q=need.key==='medicLt'?'M':need.key.slice(5),pref=prefOf(sim.rules[need.u]);
-    plan.push({need:{...need,soft:true},legs,start:best.start,end:best.end,reason:(need.key==='medicLt'?need.u+'’s only paramedic is the lieutenant; another paramedic is preferred. ':need.u+' has '+(pref-need.n)+' with '+q+'; '+pref+' preferred. ')+legs[0].name+' has '+q+(legs[0].from===legs[0].to?'':', from '+legs[0].from)+'.'+legs.slice(1).map(l=>' '+l.name+' goes to '+l.to+' from '+l.from+'.').join('')});
+    plan.push({need:{...need,soft:true},legs,start:best.start,end:best.end,reason:need.key.startsWith('team ')?planReason(need,legs,r):(need.key==='medicLt'?need.u+'’s only paramedic is the lieutenant; another paramedic is preferred. ':need.u+' has '+(pref-need.n)+' with '+q+'; '+pref+' preferred. ')+legs[0].name+' has '+q+(legs[0].from===legs[0].to?'':', from '+legs[0].from)+'.'+legs.slice(1).map(l=>' '+l.name+' goes to '+l.to+' from '+l.from+'.').join('')});
     sim.log.push(...legs);placed=true;break;
    }
    if(!placed)break;
   }
   const last=suggestions(data,sim);
-  autoRun.remaining=planNeeds(last,sim,true);
-  autoRun.balance=hiringPlan(last,sim);
-  for(const o of autoRun.balance.seats)if(o.status==='Review on-duty placement')o.detail=placementClues(o,last,sim);
+  autoRun.remaining=planNeeds(last,sim,true).filter(x=>!x.key.startsWith('team '));
+  autoRun.balance=hiringPlan(last,{...sim,rules:state.rules});
+  for(const o of autoRun.balance.seats)if(o.status==='Review on-duty placement')o.detail=placementClues(o,last,{...sim,rules:state.rules});
   autoRun.marks=autoRun.balance.seats.filter(x=>x.status==='Proposed hire').map(x=>({u:x.unit,n:1,roles:[x.role],start:x.start,end:x.end}));
   autoRun.plan=plan;autoRun.sig=autoSig();autoRun.ms=Math.round(performance.now()-t0);
  }catch(e){note('Auto-build stopped: '+e.message)}
@@ -726,7 +738,7 @@ function approvePlan(){
 }
 // One item can be approved alone only if it is valid against the roster as it stands now.
 function planItemValid(item){
- const st={...state,pass:3,...(item.need.soft?{rules:prefRules(state.rules)}:{})},ts=[item.start,...result.bs.filter(t=>item.start<t&&t<item.end)];
+ const st={...state,pass:3,rules:withTeamFallback(item.need.soft?prefRules(state.rules):state.rules)},ts=[item.start,...result.bs.filter(t=>item.start<t&&t<item.end)];
  return ts.every(t=>!!exchangeCheck(exchangeSnapshot(data,st,result,t),st,item.need.u,item.legs,item.need.key==='medic'?null:item.need.key));
 }
 function approvePlanItem(i){
@@ -740,7 +752,7 @@ function skipPlanItem(i){
 }
 function autoPanel(){
  const units=[...Object.keys(data.units).filter(u=>kind(u)==='Rover'),...Object.keys(state.rules).filter(u=>state.rules[u].active)];
- let out='<section class=card><small class=eyebrow>AUTO-BUILD</small><h2>Build the staffing plan</h2><p>Works out moves for the whole shift at once: officer, driver, paramedic and team needs first, then open seats, with Kelly Day openings last. Extras are placed first; ride-ups into Kelly Day seats are used only when an extra fills the seat left behind, firefighters to engineer before engineers to lieutenant. It compares alternate assignments for overlapping needs. It proposes hiring marks only up to the shift shortage in each time window. Last, it uses extras and swaps for two preferences: A, D and H teams at 4 rather than the minimum 3, and a paramedic other than the lieutenant. It never takes another unit below its own preferred level to do it. It uses the fewest moves it can, prefers the same district, and never leaves a new gap on the unit someone comes from. Only floating lieutenants and engineers are moved between units; assigned officers stay put, except an engineer moving within the same station to balance paramedics. Locked members and seats marked for hiring are left alone. Nothing changes until you approve.</p>'+
+ let out='<section class=card><small class=eyebrow>AUTO-BUILD</small><h2>Build the staffing plan</h2><p>Review proposed crew moves and hiring needs before approving the plan.</p>'+
  '<div class="autoOptions"><label><input type=checkbox '+(autoRun.rideUps?'checked':'')+' onchange="autoRun.rideUps=this.checked"> Allow ride-ups</label><label><input type=checkbox '+(autoRun.fillKD?'checked':'')+' onchange="autoRun.fillKD=this.checked"> Fill Kelly Day openings</label>'+
  '<label>Don’t pull from <select onchange="if(this.value){autoRun.protect.push(this.value);draw()}"><option value="">Add a unit…</option>'+units.filter(u=>!autoRun.protect.includes(u)).map(u=>'<option>'+esc(u)+'</option>').join('')+'</select></label>'+autoRun.protect.map((u,i)=>'<button type=button class="chip" onclick="autoRun.protect.splice('+i+',1);draw()" aria-label="Allow pulling from '+esc(u)+'">'+esc(u)+' ×</button>').join('')+'</div>'+
  '<div class=actions><button class=primary onclick="buildPlan()" '+(autoRun.running?'disabled':'')+'>'+(autoRun.plan?'Rebuild plan':'Build staffing plan')+'</button>'+(autoRun.skip.length?'<button onclick="autoRun.skip=[];buildPlan()">Restore skipped moves ('+autoRun.skip.length+')</button>':'')+'</div><p id="autoProgress" class="muted" role="status">'+(autoRun.running?'Building…':'')+'</p></section>';
@@ -854,7 +866,7 @@ function jumpUnit(u){
  const el=find();if(!el)return;
  el.scrollIntoView({behavior:'smooth',block:'start'});el.classList.add('flash');setTimeout(()=>el.classList.remove('flash'),1800);
 }
-function needLabel(k){if(!k.startsWith('paid '))return needNames[k]||k;const q=k.slice(5);return 'Paid '+q+' · '+({A:'Tech rescue',D:'Dive',H:'HazMat'}[q]||q)}
+function needLabel(k){if(k.startsWith('team '))return 'Specialty coverage ('+k.slice(5)+' / '+k.slice(5).toLowerCase()+')';if(!k.startsWith('paid '))return needNames[k]||k;const q=k.slice(5);return 'Paid '+q+' · '+({A:'Tech rescue',D:'Dive',H:'HazMat'}[q]||q)}
 function needWhen(s,e){return s===0&&e===shiftEnd?'Full shift':clock(s)+'–'+clock(e)}
 function tileHead(x,headText){
  const {u,meta,rule,needs,low}=x,short=rule?.active?Math.max(0,rule.min-low):0;let cls='',status;
@@ -1173,23 +1185,24 @@ function rosterRank(id){return data.records.find(r=>r.id===id&&r.rank!=='Unknown
 function rankFlags(r){
  const kindOf=swapKind(r),changed=state.rankEdits?.[r.id],i=result.recs.indexOf(r);
  if(!kindOf&&!changed)return '';
- return ' <button type=button class="codePill tradePill'+(changed?' changed':'')+'" onclick="openRank('+i+')" title="Check this member’s own rank">'+esc(changed?'Rank set to '+changed+(kindOf?' · '+kindOf:''):kindOf+' · check rank')+'</button>';
+ return ' <button type=button class="codePill tradePill'+(changed?' changed':'')+'" onclick="openRank('+i+')" title="Check this member’s own rank">'+esc(changed?'Rank confirmed: '+changed+(kindOf?' · '+kindOf:''):kindOf+' · check rank')+'</button>';
 }
 let rankMember=null;
 function openRank(i){
  rankMember=result.recs[i];if(!rankMember)return;
  const orig=rosterRank(rankMember.id),kindOf=swapKind(rankMember);
  $('rankTitle').textContent='Rank · '+rankMember.name;
- $('rankInfo').textContent=rankMember.unit+' · '+rankMember.code+'. The roster shows '+orig+(kindOf?', the rank of the position on this '+kindOf.toLowerCase()+'. Set the member’s own rank if it is different.':'.');
+ $('rankInfo').textContent=rankMember.unit+' · '+rankMember.code+'. The roster shows '+orig+(kindOf?', the rank of the position on this '+kindOf.toLowerCase()+'. Confirm the member’s own rank.':'.');
  $('rankPick').value=state.rankEdits?.[rankMember.id]||orig;$('rankError').textContent='';$('rankDialog').showModal();
 }
 function saveRank(){if(!rankMember)return;if(setRank(rankMember.id,$('rankPick').value))$('rankDialog').close()}
 function setRank(id,rank){
  if(!['Lt','Eng','FF'].includes(rank))return false;
- if(state.log.some(m=>m.id===id)){const msg='Undo this member’s approved moves before changing their rank.';if($('rankDialog').open)$('rankError').textContent=msg;else{note(msg);draw()}return false}
+ if(state.log.some(m=>m.id===id)&&data.records.some(r=>r.id===id&&onCodes.includes(r.code)&&(state.rankEdits?.[id]||r.rank)!==rank)){const msg='Undo this member’s approved moves before changing their rank.';if($('rankDialog').open)$('rankError').textContent=msg;else{note(msg);draw()}return false}
  const orig=rosterRank(id),name=data.records.find(r=>r.id===id)?.name||id;
- if(rank===orig){if(state.rankEdits)delete state.rankEdits[id]}else(state.rankEdits??={})[id]=rank;
- state.skip=[];recon='';draw();note(name+(rank===orig?' uses their roster rank ('+orig+') again.':' now planned as '+rank+'. Openings and suggestions are updated.'));return true;
+ if(rank!==orig||data.records.some(r=>r.id===id&&swapKind(r)))(state.rankEdits??={})[id]=rank;
+ else if(state.rankEdits)delete state.rankEdits[id];
+ state.skip=[];recon='';draw();note(name+(rank===orig?' confirmed at roster rank '+orig+'.':' now planned as '+rank+'. Openings and suggestions are updated.'));return true;
 }
 function canMove(r){return ['Lt','Eng','FF'].includes(r.rank)&&(kind(r.unit)==='Rover'||!!state.rules[r.unit]?.active)}
 function unitShiftChanges(unit,whole=false){
@@ -1556,9 +1569,17 @@ function openingBoard(){
 }
 let openingSeat=null,openingPeople=[];
 function openCandidates(u,key,roversOnly=false,prefer=false){
- const st=prefer?{...state,rules:prefRules(state.rules)}:state;
+ let st=prefer?{...state,rules:prefRules(state.rules)}:state;
  const passes=key==='driver'?[1,3]:key==='officer'?[0,3]:[2,1,0];
- const options=passes.flatMap(pass=>coordinated(data,{...st,pass,hireMarks:[]},result,u,at,key));
+ const candidatesFor=k=>passes.flatMap(pass=>coordinated(data,{...st,pass,hireMarks:[]},result,u,at,k))
+  .filter(p=>!roversOnly||kind(p.legs[0].from)==='Rover');
+ let options=candidatesFor(key);
+ let supplement=false;
+ if(key.startsWith('paid ')&&!options.length){
+  st={...st,rules:withTeamFallback(st.rules)};
+  options=candidatesFor('team '+key.slice(5));
+  supplement=true;
+ }
  if(key==='medic')options.push(...medicPool(data,state,result,at,u).plans);
  options.sort((a,b)=>!!a.legs[0].rideUp-!!b.legs[0].rideUp||rideNoP(a.legs)-rideNoP(b.legs)||districtOrder(data,a,b)||a.legs.length-b.legs.length||b.end-a.end||b.gain-a.gain);
  const seen=new Set();openingPlans=options.filter(p=>{
@@ -1579,10 +1600,10 @@ function openCandidates(u,key,roversOnly=false,prefer=false){
   if(roversOnly&&kind(r.unit)!=='Rover')return false;
   const role=seatRole(key,r);if(!role||!eligibleSeat(u,r,role))return false;
   if(r.unit===u&&!(canRideUp(r.rank,role)&&(r.acting||r.rank)===r.rank))return false;
-  if(key==='medic'&&!r.qual.includes('M')||key==='medicLt'&&(!r.qual.includes('M')||role==='Lt')||key==='missingL'&&!r.qual.includes('L')||key.startsWith('paid ')&&!r.qual.includes(key.slice(5)))return false;
+  if(key==='medic'&&!r.qual.includes('M')||key==='medicLt'&&(!r.qual.includes('M')||role==='Lt')||key==='missingL'&&!r.qual.includes('L')||key.startsWith('paid ')&&!r.qual.includes(key.slice(5))&&!(supplement&&r.qual.includes(key.slice(5).toLowerCase())))return false;
   return true;
  }).sort((a,b)=>withPlans.has(b.id)-withPlans.has(a.id)||(seatRole(key,a)!==a.rank)-(seatRole(key,b)!==b.rank)||(seatRole(key,b)!==b.rank&&b.qual.includes('P'))-(seatRole(key,a)!==a.rank&&a.qual.includes('P'))||districtCost(data,a.unit,u)-districtCost(data,b.unit,u)||a.name.localeCompare(b.name));
- $('openingTitle').textContent=u+' · '+(needNames[key]||needLabel(key))+(prefer?(key==='medicLt'?' · preferred':' · '+prefOf(state.rules[u])+' preferred'):'')+' · '+needWhen(openingSeat.start,openingSeat.end);
+ $('openingTitle').textContent=u+' · '+(needNames[key]||needLabel(key))+(supplement?' · lowercase supplements eligible':'')+(prefer?(key==='medicLt'?' · preferred':' · '+prefOf(state.rules[u])+' preferred'):'')+' · '+needWhen(openingSeat.start,openingSeat.end);
  $('openingPerson').innerHTML='<option value="">All suggestions ('+openingPlans.length+')</option>'+openingPeople.map(r=>'<option value="'+esc(r.id)+'">'+esc(r.name)+' · '+esc(r.unit)+' · '+esc(seatRole(key,r)!==r.rank?r.rank+' ride-up':r.rank)+(withPlans.has(r.id)?'':' · no backfill found')+'</option>').join('');
  $('openingPersonLabel').hidden=!openingPeople.length;
  filterOpeningPerson('');$('openingDialog').showModal();
@@ -1675,13 +1696,13 @@ function guideWindows(i){
 }
 function tradeCheck(){
  const seen=new Set(),rows=result.recs.filter(r=>swapKind(r)&&!seen.has(r.id)&&seen.add(r.id));
- const pick=r=>{const cur=state.rankEdits?.[r.id]||rosterRank(r.id);return '<select aria-label="Rank for '+esc(r.name)+'" data-id="'+esc(r.id)+'" onchange="setRank(this.dataset.id,this.value)">'+['Lt','Eng','FF'].map(x=>'<option '+(x===cur?'selected':'')+'>'+x+'</option>').join('')+'</select>'};
- return '<section class=card><h2>Shift trades and Kelly swaps · '+rows.length+'</h2><p>A member working a shift trade (STW) or Kelly swap (KSON) appears with the rank of the position they fill. Check each one and set their own rank if it is different, for example a firefighter trading into an engineer seat.</p>'+
+ const pick=r=>{const cur=state.rankEdits?.[r.id]||rosterRank(r.id);return '<select aria-label="Rank for '+esc(r.name)+'" data-id="'+esc(r.id)+'" onchange="setRank(this.dataset.id,this.value)"> '+(cur==='Unknown'?'<option selected disabled>Choose rank</option>':'')+['Lt','Eng','FF'].map(x=>'<option '+(x===cur?'selected':'')+'>'+x+'</option>').join('')+'</select> '+(state.rankEdits?.[r.id]?'Confirmed':cur==='Unknown'?'':'<button type=button data-id="'+esc(r.id)+'" onclick="setRank(this.dataset.id,rosterRank(this.dataset.id))">Confirm '+esc(cur)+'</button>')};
+ return '<section class=card><h2>Shift trades and Kelly swaps · '+rows.length+'</h2><p>A member working a shift trade (STW) or Kelly swap (KSON) appears with the rank of the position they fill. Confirm the displayed rank or select the member’s own rank.</p>'+
  (rows.length?table(['Member','Unit','Code','Roster shows','Plan as'],rows.map(r=>row([esc(r.name),esc(r.unit),esc(r.code),esc(rosterRank(r.id)),pick(r)])).join('')):'<p class=muted>No shift trades or Kelly swaps on this roster.</p>')+'</section>';
 }
 function importCheck(){
  const counts=result.bs.slice(0,-1).map(t=>unique(active(result.recs,t)).length),lo=Math.min(...counts),rules=Object.values(state.rules);
- const items=[['Shift date',esc(data.date)+' · 0800 to 0800'],['Source',esc(source)],['Roster rows read',data.records.length],['Apparatus in service',rules.filter(r=>r.active).length+' of '+rules.length],['Lowest on duty',lo+' against the '+shiftMin()+' minimum'],['Members locked in place',state.locks.length||'None'],['Rank changes',Object.keys(state.rankEdits||{}).length||'None']];
+ const items=[['Shift date',esc(data.date)+' · 0800 to 0800'],['Source',esc(source)],['Roster rows read',data.records.length],['Apparatus in service',rules.filter(r=>r.active).length+' of '+rules.length],['Lowest on duty',lo+' against the '+shiftMin()+' minimum'],['Members locked in place',state.locks.length||'None'],['Ranks reviewed',Object.keys(state.rankEdits||{}).length||'None']];
  return '<section class=card><h2>Imported roster</h2>'+table(['Check','Result'],items.map(x=>row(x)).join(''))+(data.warnings.length?'<div class=warn>'+esc(data.warnings.join(' '))+'</div>':'<p>No import warnings.</p>')+'<div class=actions><button onclick="openView(&quot;Roster&quot;)">Remove members or change hours</button></div></section>'+tradeCheck();
 }
 function guidePanel(){
