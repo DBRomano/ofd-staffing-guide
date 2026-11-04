@@ -127,3 +127,26 @@ test('keep an eligible rover out of a second driver position when a different to
   assert.ok(run("exchangeCheck(snap,{...sim,preferEngineers:false},'Rescue 1',linked,'driver')"));
   assert.equal(run("exchangeCheck(snap,sim,'Rescue 1',linked,'driver')"),null);
 });
+
+test('reserve overtime in rank order before riding members up', async () => {
+  const run=planner([
+    member('driver','Engine 2','Eng','M'),member('relief','Engine 2','FF','EP'),
+    member('officer','Engine 3','Lt','M'),member('second relief','Engine 3','FF','EP'),
+    member('officer four','Engine 4','Lt','M'),member('driver four','Engine 4','Eng','')
+  ],9);
+  run("for(const rule of Object.values(state.rules))rule.min=3");
+  await run('buildPlan()');
+  assert.equal(run("autoRun.plan.flatMap(p=>p.legs).filter(l=>l.rideUp).length"),0);
+  assert.equal(run("autoRun.marks.map(m=>m.roles[0]).join(',')"),'Lt,Eng,FF');
+});
+
+test('allow a necessary ride-up after a partial-shift OT shortage ends', async () => {
+  const run=planner([
+    member('officer','Engine 3','Lt','M'),member('relief','Engine 3','FF','EP'),
+    {...member('extra','DIV1 Rovers','FF',''),start:720}
+  ],3);
+  run("state.rules['Engine 3'].min=3");
+  await run('buildPlan()');
+  assert.ok(run("autoRun.marks.some(m=>m.roles[0]==='Eng'&&m.start===0&&m.end===720)"));
+  assert.ok(run("autoRun.plan.flatMap(p=>p.legs).some(l=>l.id==='relief'&&l.rideUp&&l.start===720&&l.end===1440)"));
+});

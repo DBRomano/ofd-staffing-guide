@@ -344,6 +344,12 @@ function exchangeCheck(snapshot,state,target,legs,need=null,manual=null){
    if(engineers.length&&after.some(r=>driver(r)&&r.rank==='FF'&&legs.some(l=>l.id===r.id&&l.role==='Eng')))return block('An Engineer already covers this driver seat.');
   }
   const benefits=[];
+  if(state.inGradeOnly&&next.seats<before.seats){
+   // Preserve rank-specific openings until we know which seats require overtime.
+   const openBefore=openRoles(before).slice(0,before.seats),openAfter=openRoles(next).slice(0,next.seats);
+   if(openBefore.includes('Lt')&&next.officer&&!openAfter.includes('Lt'))return null;
+   if(openBefore.includes('Eng')&&next.driver&&!openAfter.includes('Eng'))return null;
+  }
   if(state.preserveHolds){
    const reserved=reservedRoles(u,snapshot.t,crew,state.hireMarks).slice(0,before.seats);
    const stillOpen=openRoles(next).slice(0,next.seats);
@@ -647,7 +653,7 @@ function planNeeds(r,sim,all=false){
 function needPlans(r,sim,need,reviews=null){
  const groups=need.key==='officer'?[[0],[3]]:need.key==='driver'?[[1],[3]]:[[2,1,0]];
  for(const [gi,group] of groups.entries()){
-  if(gi>0&&!autoRun.rideUps)break;
+  if(gi>0&&(!autoRun.rideUps||sim.inGradeOnly))break;
   let plans=group.flatMap(p=>coordinated(data,{...sim,pass:p},r,need.u,need.start,need.key));
   if(need.key==='medic')plans=plans.concat(medicPool(data,sim,r,need.start,need.u).plans);
   const rankOf=l=>(r.recs.find(x=>x.id===l.id&&x.unit===l.from)||r.recs.find(x=>x.id===l.id))?.rank;
@@ -773,7 +779,7 @@ async function buildPlan(){
  autoRun.running=true;autoRun.rankReviews=new Map();autoRun.plan=null;autoRun.remaining=[];
  if(tab!=='Auto-build')tab='Auto-build';draw();
  const t0=performance.now(),sim=JSON.parse(JSON.stringify(state)),plan=[],tried=new Set();
- sim.pass=2;sim.skip=[];sim.preserveHolds=true;sim.preferEngineers=true;sim.hireMarks=fixedHireMarks(sim.hireMarks);
+ sim.pass=2;sim.skip=[];sim.inGradeOnly=true;sim.preserveHolds=true;sim.preferEngineers=true;sim.hireMarks=fixedHireMarks(sim.hireMarks);
   sim.rules=withTeamFallback(sim.rules);
  try{
   // Needs that found no move are retried once more after other moves land, because placing extras
@@ -799,6 +805,13 @@ async function buildPlan(){
    }
    if(placed){placedSinceRetry=true;continue}
    if(placedSinceRetry&&tried.size){tried.clear();placedSinceRetry=false;continue}
+   if(sim.inGradeOnly){
+    // In-grade moves are exhausted. Protect the top-down OT seats in each shortage window
+    // before considering acting assignments for the rest of the roster.
+    const vacancies=hiringPlan(r,{...sim,rules:state.rules}).seats;
+    for(const o of vacancies)if(o.status==='Proposed hire')sim.hireMarks.push({u:o.unit,key:'seats',start:o.start,end:o.end,source:'plannedOT'});
+    sim.inGradeOnly=false;tried.clear();i=-1;continue;
+   }
    break;
   }
   // Preferred team strength. Every unit is judged against its preferred count here, so a swap can never
@@ -1575,7 +1588,7 @@ function hiringPlan(view=result,sim=state){
  const seats=[],needs=[],strength=[],balance=[],last=new Map(),marks=sim.hireMarks||[];
  const add=(list,key,item)=>{const prev=last.get(key);if(prev&&prev.end===item.start){prev.end=item.end;return}list.push(item);last.set(key,item)};
  const times=[...new Set([...view.bs,...marks.flatMap(m=>[m.start,m.end])])].sort((a,b)=>a-b);
- const priority={Lt:0,Eng:1,FF:2};
+ const priority={Lt:0,Eng:1,FF:2},existing=marks.filter(m=>m.source!=='plannedOT');
  for(let i=0;i<times.length-1;i++){
   const start=times[i],end=times[i+1],open=[],on=unique(active(view.recs,start)).length,short=Math.max(0,shiftMin()-on);
   for(const [unit,rule] of Object.entries(sim.rules)){
@@ -1590,10 +1603,11 @@ function hiringPlan(view=result,sim=state){
   }
   open.sort((a,b)=>Number(b.held)-Number(a.held)||priority[a.role]-priority[b.role]||a.unit.localeCompare(b.unit,undefined,{numeric:true})||a.seat-b.seat);
   open.forEach((o,j)=>{
-   const status=o.held?'Already marked':j<short?'Proposed hire':'Review on-duty placement';
+   const fixed=marksAt(o.unit,start,existing);
+   const status=o.seat<fixed?'Already marked':o.held||j<short?'Proposed hire':'Review on-duty placement';
    add(seats,[o.unit,o.seat,o.role,status].join('|'),{...o,status,start,end});
   });
-  const held=open.filter(o=>o.held).length;
+  const held=open.filter(o=>o.seat<marksAt(o.unit,start,existing)).length;
   add(balance,[on,open.length,held].join('|'),{on,short,open:open.length,held,start,end});
   if(short)add(strength,'short|'+short,{short,start,end});
  }
@@ -1616,7 +1630,7 @@ function handoff(){
  const plan=hiringPlan(),{seats,needs,strength}=plan;
  const tentative=(state.hireMarks||[]).map((m,i)=>m.source==='auto'?'<p>'+esc(m.u)+' · '+needWhen(m.start,m.end)+' <button onclick="commitHireMark('+i+')">Hold for hiring on rebuild</button></p>':'').join('');
  return '<div class=card><h3>4. Shift shortage and apparatus openings</h3>'+balanceTable(plan)+(tentative?'<details><summary>Auto-Build hiring recommendations</summary>'+tentative+'</details>':'')+
- '<p>Existing hiring marks take priority. Additional proposed hires are limited to the shift shortage in each window, in lieutenant, engineer, firefighter order. Review other openings for on-duty placement.</p>'+
+ '<p>Fill overtime seats in rank order: Lieutenant, Engineer, then Firefighter. If Kelly Day hiring does not cover the shortage, continue in that order for off-shift overtime.</p>'+
  (seats.length?table(['Unit','Seat','From / through','Decision'],seats.map(o=>row([esc(o.unit),esc(o.role),needWhen(o.start,o.end),o.status])).join('')):'<p>No empty apparatus seats.</p>')+
  (strength.length?'<p class=warn>Shift strength is below the '+shiftMin()+' minimum: '+strength.map(x=>needWhen(x.start,x.end)+' short '+x.short).join(' · ')+'.</p>':'')+
  '<h4>Needs to solve by moving people · '+needs.length+'</h4>'+(needs.length?'<p class=muted>Bring these roles and letters in from other units, with ride-ups where allowed. A Kelly Day hire can backfill the seat a moved member leaves.</p>'+table(['Unit','Needs','From / through',''],needs.map(o=>row([esc(o.unit),esc(o.need),needWhen(o.start,o.end),'<button data-unit="'+esc(o.unit)+'" data-need="'+esc(o.key)+'" onclick="at='+o.start+';openCandidates(this.dataset.unit,this.dataset.need)">Find moves</button>'])).join('')):'<p class=muted>Every unit has the officer, driver, paramedic and team letters it needs.</p>')+'</div>';
