@@ -96,6 +96,36 @@ function parseRows(rows,date){
  if(!records.some(r=>offCodes.includes(r.code)&&r.code!=='^FTRAN'))warnings.push('No leave or KD rows detected. Leave priority and fully empty units may be missing.');
  return {date,records,units,warnings};
 }
+const fleetStations=[
+ ["D-1", "Station 1", ["Division 1", "District 1", "EMS 1", "Engine 1", "Engine 101", "Rescue 1", "Tower 1", "Medic 102", "Medic 801"]],
+ ["D-1", "Station 4", ["Engine 4"]],
+ ["D-1", "Station 5", ["Engine 5"]],
+ ["D-1", "Station 6", ["District 6", "Engine 6", "Rescue 6", "Tower 6"]],
+ ["D-2", "Station 10", ["District 7", "Engine 10", "Tower 10", "Rescue 10"]],
+ ["D-2", "Station 12", ["Engine 12", "Rescue 12"]],
+ ["D-2", "Station 17", ["District 2", "Engine 17", "Medic 171"]],
+ ["D-3", "Station 2", ["Engine 2", "Rescue 2", "Tower 2", "Medic 201"]],
+ ["D-3", "Station 3", ["Engine 3", "Rescue 3"]],
+ ["D-3", "Station 7", ["District 3", "Engine 7", "Heavy Rescue 1", "Rescue 7", "Medic 601"]],
+ ["D-3", "Station 9", ["Engine 9", "Rescue 9", "Tower 9"]],
+ ["D-4", "Station 8", ["Engine 8", "Rescue 8", "Tower 8"]],
+ ["D-4", "Station 11", ["District 4", "Engine 11", "Rescue 11", "Tower 11", "Medic 141"]],
+ ["D-4", "Station 13", ["Engine 13"]],
+ ["D-5", "Station 14", ["Engine 14", "Hazmat 1"]],
+ ["D-5", "Station 15", ["Engine 15", "Rescue 15", "Tower 15"]],
+ ["D-5", "Station 16", ["District 5", "Engine 16", "Medic 161"]],
+ ["D-5", "Station 19", ["Engine 19", "Medic 901"]]
+];
+function completeRosterUnits(d){
+ const missing=[];
+ for(const [region,station,names] of fleetStations)for(const unit of names){
+  if(Object.hasOwn(d.units,unit))continue;
+  d.units[unit]={region,station};missing.push(unit);
+ }
+ if(missing.length)d.warnings.push('Absent from source roster; added without crew: '+missing.join(', ')+'. Review in-service status before hiring.');
+ return d;
+}
+function displayedUnit(u){return ['Apparatus','Command','Civilian'].includes(kind(u))}
 function rulesFor(data){return Object.fromEntries(Object.keys(data.units).filter(u=>kind(u)==='Apparatus').map(u=>[u,{min:standard(u),team:({'Tower 1':'AD','Tower 15':'AD','Tower 2':'H','Tower 8':'H','Tower 9':'H','Tower 10':'A','Tower 11':'A','Engine 101':'H','Engine 19':'H','Heavy Rescue 1':'AD','Hazmat 1':'H'}[u]||''),paid:3,pref:4,active:true}]))}
 function working(data,unitTypes=['Apparatus','Rover','Command']){
  const scheduled=data.records.filter(r=>onCodes.includes(r.code)&&unitTypes.includes(kind(r.unit)));
@@ -253,7 +283,7 @@ function suggestions(data,state){
  for(const op of options){let key=JSON.stringify([op.id,op.from,op.to,op.role,op.codes]);let list=byMove.get(key)||[],last=list.at(-1);if(last&&last.end===t&&last.effect===op.effect)last.end=end;else list.push({...op,start:t,end,choices:options.length});byMove.set(key,list)}
  }}}
  let candidates=[...byMove.values()].flat().filter(m=>!state.skip.includes(sig(m))).sort((a,b)=>a.priority-b.priority||b.promo-a.promo||districtCost(data,a.from,a.to)-districtCost(data,b.from,b.to)||a.choices-b.choices||b.score-a.score||(b.end-b.start)-(a.end-a.start)||a.to.localeCompare(b.to)||a.name.localeCompare(b.name));
- return {recs,bs,candidates,issues,effectiveLog,assignments,planningData:data};
+ return {recs,civilianRecs:working(data,['Civilian']),bs,candidates,issues,effectiveLog,assignments,planningData:data};
 }
 function districtCost(data,from,to){
  const a=data.units[from]?.region,b=data.units[to]?.region;
@@ -344,6 +374,12 @@ function exchangeCheck(snapshot,state,target,legs,need=null,manual=null){
    if(engineers.length&&after.some(r=>driver(r)&&r.rank==='FF'&&legs.some(l=>l.id===r.id&&l.role==='Eng')))return block('An Engineer already covers this driver seat.');
   }
   const benefits=[];
+  if(state.inGradeOnly&&next.seats<before.seats){
+   // Preserve rank-specific openings until we know which seats require overtime.
+   const openBefore=openRoles(before).slice(0,before.seats),openAfter=openRoles(next).slice(0,next.seats);
+   if(openBefore.includes('Lt')&&next.officer&&!openAfter.includes('Lt'))return null;
+   if(openBefore.includes('Eng')&&next.driver&&!openAfter.includes('Eng'))return null;
+  }
   if(state.preserveHolds){
    const reserved=reservedRoles(u,snapshot.t,crew,state.hireMarks).slice(0,before.seats);
    const stillOpen=openRoles(next).slice(0,next.seats);
@@ -591,7 +627,7 @@ let data,state,result,tab='Move planner',at=0,source='',recon='';
 let savedKey=null,savedRevision=null,cleanState='';
 let fullShift=true;
 let swapOptions=[],swapTarget="";
-function start(d,label){fullShift=true;optionPages={};savedKey=null;savedRevision=null;data=d;source=label;state={pass:0,log:[],skip:[],locks:[],rules:rulesFor(d),minimum:defaultShiftMinimum,guide:0};tab='Staffing walkthrough';openingFilter='All';at=0;recon='';cleanState=JSON.stringify(state);$('draftName').value='Roster '+d.date;$('msg').textContent='';draw()}
+function start(d,label){fullShift=true;optionPages={};savedKey=null;savedRevision=null;data=completeRosterUnits(d);source=label;state={pass:0,log:[],skip:[],locks:[],rules:rulesFor(d),minimum:defaultShiftMinimum,guide:0};tab='Staffing walkthrough';openingFilter='All';at=0;recon='';cleanState=JSON.stringify(state);$('draftName').value='Roster '+d.date;$('msg').textContent='';draw()}
 function confirmAlert(m){return confirm(m)}
 function gapsAt(t){return result.issues.filter(i=>i.t===t)}
 function table(head,body){
@@ -647,7 +683,7 @@ function planNeeds(r,sim,all=false){
 function needPlans(r,sim,need,reviews=null){
  const groups=need.key==='officer'?[[0],[3]]:need.key==='driver'?[[1],[3]]:[[2,1,0]];
  for(const [gi,group] of groups.entries()){
-  if(gi>0&&!autoRun.rideUps)break;
+  if(gi>0&&(!autoRun.rideUps||sim.inGradeOnly))break;
   let plans=group.flatMap(p=>coordinated(data,{...sim,pass:p},r,need.u,need.start,need.key));
   if(need.key==='medic')plans=plans.concat(medicPool(data,sim,r,need.start,need.u).plans);
   const rankOf=l=>(r.recs.find(x=>x.id===l.id&&x.unit===l.from)||r.recs.find(x=>x.id===l.id))?.rank;
@@ -773,7 +809,7 @@ async function buildPlan(){
  autoRun.running=true;autoRun.rankReviews=new Map();autoRun.plan=null;autoRun.remaining=[];
  if(tab!=='Auto-build')tab='Auto-build';draw();
  const t0=performance.now(),sim=JSON.parse(JSON.stringify(state)),plan=[],tried=new Set();
- sim.pass=2;sim.skip=[];sim.preserveHolds=true;sim.preferEngineers=true;sim.hireMarks=fixedHireMarks(sim.hireMarks);
+ sim.pass=2;sim.skip=[];sim.inGradeOnly=true;sim.preserveHolds=true;sim.preferEngineers=true;sim.hireMarks=fixedHireMarks(sim.hireMarks);
   sim.rules=withTeamFallback(sim.rules);
  try{
   // Needs that found no move are retried once more after other moves land, because placing extras
@@ -799,6 +835,13 @@ async function buildPlan(){
    }
    if(placed){placedSinceRetry=true;continue}
    if(placedSinceRetry&&tried.size){tried.clear();placedSinceRetry=false;continue}
+   if(sim.inGradeOnly){
+    // In-grade moves are exhausted. Protect the top-down OT seats in each shortage window
+    // before considering acting assignments for the rest of the roster.
+    const vacancies=hiringPlan(r,{...sim,rules:state.rules}).seats;
+    for(const o of vacancies)if(o.status==='Proposed hire')sim.hireMarks.push({u:o.unit,key:'seats',start:o.start,end:o.end,source:'plannedOT'});
+    sim.inGradeOnly=false;tried.clear();i=-1;continue;
+   }
    break;
   }
   // Preferred team strength. Every unit is judged against its preferred count here, so a swap can never
@@ -967,10 +1010,10 @@ let rosterShow='All';
 // One summary per unit for the crew roster: needs, low/high headcount and whether it can give a member.
 function rosterUnits(){
  const next=result.bs.find(t=>t>at)??shiftEnd;
- return Object.entries(data.units).filter(([u])=>state.rules[u]||result.recs.some(r=>r.unit===u)).map(([u,meta])=>{
+ return Object.entries(data.units).filter(([u])=>displayedUnit(u)||state.rules[u]||result.recs.some(r=>r.unit===u)).map(([u,meta])=>{
   const rule=state.rules[u];let needs,low,high;
   if(fullView()){const d=unitDay(u);needs=d.needs;low=d.low;high=d.high}
-  else{const crew=unique(active(result.recs,at).filter(r=>r.unit===u));low=high=crew.length;needs=rule?.active?Object.entries(gapProfile(u,crew,rule)).filter(([,n])=>n>0).map(([k,n])=>[k,n,at,next]):[]}
+  else{const crew=crewAt(u,at,kind(u)==='Civilian'?result.civilianRecs:result.recs);low=high=crew.length;needs=rule?.active?Object.entries(gapProfile(u,crew,rule)).filter(([,n])=>n>0).map(([k,n])=>[k,n,at,next]):[]}
   const give=kind(u)==='Rover'?low>0:!!rule?.active&&low>rule.min;
   return {u,meta,rule,needs,low,high,give};
  });
@@ -1024,6 +1067,7 @@ function otherNeeds(u,needs){
 }
 function qualHtml(q){return '<span class="tileQual">'+q.map(x=>'<span class="'+(x==='M'?'tileMedic':'')+'">'+esc(x)+'</span>').join(' ')+'</span>'}
 function memberActions(r,setAt=false,label=''){
+ if(kind(r.unit)==='Civilian')return '';
  const i=result.recs.indexOf(r),pre=setAt?'at='+r.start+';':'',close="this.closest('details').open=false;";
  return '<div class="memberActions">'+(canMove(r)?'<button type=button class="moveBtn" onclick="'+pre+'openRosterMove('+i+')">Move'+esc(label)+'</button>':'')+'<details class="more"><summary aria-label="More actions for '+esc(r.name)+'">⋯</summary><div class="menu"><button type=button onclick="'+close+pre+'openSick('+i+')">Remove from roster</button><button type=button onclick="'+close+'openHours('+i+')">Edit hours</button><button type=button onclick="'+close+'openRank('+i+')">Change rank</button></div></details></div>';
 }
@@ -1031,7 +1075,7 @@ document.addEventListener('click',e=>{for(const d of document.querySelectorAll('
 // Full-shift crew list for one unit: working members, then members off duty on this unit.
 function crewList(unit){
  const members=new Map();
- for(const r of [...result.recs.filter(r=>r.unit===unit),...result.planningData.records.filter(r=>r.unit===unit&&offCodes.includes(r.code)&&r.code!=='^FTRAN')]){if(!members.has(r.id))members.set(r.id,[]);members.get(r.id).push(r)}
+ for(const r of [...(kind(unit)==='Civilian'?result.civilianRecs:result.recs).filter(r=>r.unit===unit),...result.planningData.records.filter(r=>r.unit===unit&&offCodes.includes(r.code)&&r.code!=='^FTRAN')]){if(!members.has(r.id))members.set(r.id,[]);members.get(r.id).push(r)}
  const rankOrder={Lt:0,Eng:1,FF:2},labels=firefighterLabels(unique(result.recs.filter(r=>r.unit===unit))),working=[],off=[];
  for(const rows of [...members.values()].sort((a,b)=>(rankOrder[a[0].acting||a[0].rank]??3)-(rankOrder[b[0].acting||b[0].rank]??3)||a[0].name.localeCompare(b[0].name))){
   if((finderLetter&&!rows.some(r=>r.qual.includes(finderLetter)))||(finderRank&&!rows.some(r=>r.rank===finderRank)))continue;
@@ -1272,7 +1316,7 @@ function sickList(){
 function fullView(){return fullShift&&(tab==='Roster'||tab==='Openings')}
 function unitDay(u,view=result){
  const rule=state.rules[u],needs=[],last=new Map(),heads=[];
- const records=view.recs.filter(r=>r.unit===u);
+ const records=(kind(u)==='Civilian'?view.civilianRecs:view.recs).filter(r=>r.unit===u);
  for(let i=0;i<view.bs.length-1;i++){
   const start=view.bs[i],end=view.bs[i+1],crew=unique(active(records,start));
   heads.push(crew.length);
@@ -1309,6 +1353,7 @@ const tradeCodes=['STW','⤧STW','.STW'];
 function swapKind(r){return tradeCodes.includes(r.code)?'Shift trade':r.code==='KSON'?'KD swap':''}
 function rosterRank(id){return data.records.find(r=>r.id===id&&r.rank!=='Unknown')?.rank||'Unknown'}
 function rankFlags(r){
+ if(kind(r.unit)==='Civilian')return '';
  const kindOf=swapKind(r),changed=state.rankEdits?.[r.id],i=result.recs.indexOf(r);
  if(!kindOf&&!changed)return '';
  return ' <button type=button class="codePill tradePill'+(changed?' changed':'')+'" onclick="openRank('+i+')" title="Check this member’s own rank">'+esc(changed?'Rank confirmed: '+changed+(kindOf?' · '+kindOf:''):kindOf+' · check rank')+'</button>';
@@ -1369,13 +1414,13 @@ function rosterPanel(previewLegs=null,baseline=false){
  const focus=[];let matchCount=0;const summaries=finder?rosterUnits():[],summary=new Map(summaries.map(x=>[x.u,x]));
 
  const groups=new Map();
- const activeRows=active(result.recs,crewTime);
+ const activeRows=active([...result.recs,...result.civilianRecs],crewTime);
  for(const r of activeRows){if(!groups.has(r.unit))groups.set(r.unit,[]);groups.get(r.unit).push(r)}
  const districts=new Map();
  for(const [u,meta] of Object.entries(data.units)){
   if(previewLegs&&!legs.some(x=>x.from===u||x.to===u))continue;
   const rule=state.rules[u],crew=unique(groups.get(u)||[]);
-  if(!rule&&!crew.length)continue;
+  if(!displayedUnit(u)&&!rule&&!crew.length)continue;
   if(finder&&summary.has(u)&&!rosterVisible(summary.get(u)))continue;
   if(filter){
    if(!rule?.active&&kind(u)!=='Rover')continue;
@@ -1457,7 +1502,7 @@ function rosterExportHTML(proposed=false){
  const all=[...view.recs,...civilians],groups=new Map();
  for(const [unit,meta] of Object.entries(data.units)){
   const crew=all.filter(r=>r.unit===unit),type=kind(unit),rule=state.rules[unit];
-  if(!rule&&!crew.length)continue;
+  if(!displayedUnit(unit)&&!rule&&!crew.length)continue;
   const district=type==='Command'?'Command':type==='Rover'?'Available rovers':meta.region||'Other units';
   if(!groups.has(district))groups.set(district,[]);
   const seats={Lt:0,Eng:1,FF:2};
@@ -1548,7 +1593,7 @@ async function openFOB(file){
  try{
   const {readFOB}=await import('./fob-roster.mjs');
   const knownUnits={...parseRows(examples['3'].rows,examples['3'].date).units,...data.units};
-  const fob=await readFOB(file,knownUnits);
+  const fob=completeRosterUnits(await readFOB(file,knownUnits));
   const listed=xs=>xs.length+' · '+xs.map(esc).join(', ');
   $('fobBody').innerHTML='<h2>FOB roster · '+esc(fob.date)+'</h2><p>DIV1 rovers available: '+(fob.fob.rovers.length?listed(fob.fob.rovers):'0')+'</p><p>ORSA excluded: '+(fob.fob.excluded.length?listed(fob.fob.excluded):'0')+'</p>'+
    fob.warnings.map(s=>'<p class=warn>'+esc(s)+'</p>').join('');
@@ -1575,7 +1620,7 @@ function hiringPlan(view=result,sim=state){
  const seats=[],needs=[],strength=[],balance=[],last=new Map(),marks=sim.hireMarks||[];
  const add=(list,key,item)=>{const prev=last.get(key);if(prev&&prev.end===item.start){prev.end=item.end;return}list.push(item);last.set(key,item)};
  const times=[...new Set([...view.bs,...marks.flatMap(m=>[m.start,m.end])])].sort((a,b)=>a-b);
- const priority={Lt:0,Eng:1,FF:2};
+ const priority={Lt:0,Eng:1,FF:2},existing=marks.filter(m=>m.source!=='plannedOT');
  for(let i=0;i<times.length-1;i++){
   const start=times[i],end=times[i+1],open=[],on=unique(active(view.recs,start)).length,short=Math.max(0,shiftMin()-on);
   for(const [unit,rule] of Object.entries(sim.rules)){
@@ -1590,10 +1635,11 @@ function hiringPlan(view=result,sim=state){
   }
   open.sort((a,b)=>Number(b.held)-Number(a.held)||priority[a.role]-priority[b.role]||a.unit.localeCompare(b.unit,undefined,{numeric:true})||a.seat-b.seat);
   open.forEach((o,j)=>{
-   const status=o.held?'Already marked':j<short?'Proposed hire':'Review on-duty placement';
+   const fixed=marksAt(o.unit,start,existing);
+   const status=o.seat<fixed?'Already marked':o.held||j<short?'Proposed hire':'Review on-duty placement';
    add(seats,[o.unit,o.seat,o.role,status].join('|'),{...o,status,start,end});
   });
-  const held=open.filter(o=>o.held).length;
+  const held=open.filter(o=>o.seat<marksAt(o.unit,start,existing)).length;
   add(balance,[on,open.length,held].join('|'),{on,short,open:open.length,held,start,end});
   if(short)add(strength,'short|'+short,{short,start,end});
  }
@@ -1616,7 +1662,7 @@ function handoff(){
  const plan=hiringPlan(),{seats,needs,strength}=plan;
  const tentative=(state.hireMarks||[]).map((m,i)=>m.source==='auto'?'<p>'+esc(m.u)+' · '+needWhen(m.start,m.end)+' <button onclick="commitHireMark('+i+')">Hold for hiring on rebuild</button></p>':'').join('');
  return '<div class=card><h3>4. Shift shortage and apparatus openings</h3>'+balanceTable(plan)+(tentative?'<details><summary>Auto-Build hiring recommendations</summary>'+tentative+'</details>':'')+
- '<p>Existing hiring marks take priority. Additional proposed hires are limited to the shift shortage in each window, in lieutenant, engineer, firefighter order. Review other openings for on-duty placement.</p>'+
+ '<p>Fill overtime seats in rank order: Lieutenant, Engineer, then Firefighter. If Kelly Day hiring does not cover the shortage, continue in that order for off-shift overtime.</p>'+
  (seats.length?table(['Unit','Seat','From / through','Decision'],seats.map(o=>row([esc(o.unit),esc(o.role),needWhen(o.start,o.end),o.status])).join('')):'<p>No empty apparatus seats.</p>')+
  (strength.length?'<p class=warn>Shift strength is below the '+shiftMin()+' minimum: '+strength.map(x=>needWhen(x.start,x.end)+' short '+x.short).join(' · ')+'.</p>':'')+
  '<h4>Needs to solve by moving people · '+needs.length+'</h4>'+(needs.length?'<p class=muted>Bring these roles and letters in from other units, with ride-ups where allowed. A Kelly Day hire can backfill the seat a moved member leaves.</p>'+table(['Unit','Needs','From / through',''],needs.map(o=>row([esc(o.unit),esc(o.need),needWhen(o.start,o.end),'<button data-unit="'+esc(o.unit)+'" data-need="'+esc(o.key)+'" onclick="at='+o.start+';openCandidates(this.dataset.unit,this.dataset.need)">Find moves</button>'])).join('')):'<p class=muted>Every unit has the officer, driver, paramedic and team letters it needs.</p>')+'</div>';
@@ -1712,7 +1758,7 @@ function restoreDraft(v,key=null){
  if(v?.state?.kdHires!==undefined&&(!Array.isArray(v.state.kdHires)||!v.state.kdHires.every(h=>h&&typeof h.id==='string'&&Number.isInteger(h.start)&&Number.isInteger(h.end)&&h.start>=0&&h.end<=1440&&h.end>h.start)))throw Error('Invalid hiring scenario.');
  if(!validDraft(v))throw Error('Choose a valid Staffing Guide roster backup.');
  if(!canLeave())return;
- fullShift=v.fullShift!==false;optionPages={};data=v.data;state=v.state;source=v.source;tab=validTabs.includes(v.tab)?v.tab:'Move planner';at=v.at;recon=String(v.recon||'');
+ fullShift=v.fullShift!==false;optionPages={};data=completeRosterUnits(v.data);state=v.state;state.rules={...rulesFor(data),...state.rules};source=v.source;tab=validTabs.includes(v.tab)?v.tab:'Move planner';at=v.at;recon=String(v.recon||'');
  savedKey=key;savedRevision=key?v.saved:null;cleanState=JSON.stringify(state);$('draftName').value=v.name;draw();note('Opened '+v.name+(key?' from this device.':' from backup. Use Save roster to keep a device copy.'));
 }
 function openSaved(){try{const k=$('savedPick').value;restoreDraft(JSON.parse(localStorage.getItem(k)),k)}catch(e){note(e.message)}}
