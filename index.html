@@ -644,7 +644,14 @@ function planNeeds(r,sim,all=false){
   .filter(x=>all||autoRun.fillKD||x.why!==2)
   .sort((a,b)=>(a.why===2)-(b.why===2)||kindRank(a)-kindRank(b)||a.why-b.why||a.start-b.start||b.roleNeeds-a.roleNeeds||a.u.localeCompare(b.u,undefined,{numeric:true}));
 }
+// Someone spare at time t: a rover, or a member of an above-minimum unit, who is free to move.
+function spareAt(r,sim,t){
+ const snap=exchangeSnapshot(data,sim,r,t);
+ return snap.eligible.some(m=>!autoRun.protect.includes(m.unit)&&(kind(m.unit)==='Rover'||unique(snap.units[m.unit]||[]).length>(sim.rules[m.unit]?.min??Infinity)));
+}
 function needPlans(r,sim,need,reviews=null){
+ // Filling an empty seat adds a person to the unit, which needs someone spare somewhere at that time.
+ if(need.key==='seats'&&!spareAt(r,sim,need.start))return [];
  const groups=need.key==='officer'?[[0],[3]]:need.key==='driver'?[[1],[3]]:[[2,1,0]];
  for(const [gi,group] of groups.entries()){
   if(gi>0&&!autoRun.rideUps)break;
@@ -675,7 +682,10 @@ function rankedPlans(plans,need,r=result){
  const cover=p=>Math.min(p.end,need.end)-Math.max(p.start,need.start),ride=p=>p.legs.filter(l=>l.rideUp).length;
  const dist=p=>p.legs.reduce((n,l)=>n+districtCost(data,l.from,l.to),0),rover=p=>kind(p.legs[0].from)==='Rover'?0:1;
  const lower=p=>need.key.startsWith('team ')&&!crewAt(p.legs[0].from,p.start,r.recs).find(m=>m.id===p.legs[0].id)?.qual.includes(need.key.slice(5))?1:0;
- return plans.slice().sort((a,b)=>lower(a)-lower(b)||ride(a)-ride(b)||rideNoP(a.legs)-rideNoP(b.legs)||cover(b)-cover(a)||b.gain-a.gain||stationFloats(a)-stationFloats(b)||a.legs.length-b.legs.length||prefHit(a)+medicHit(a)-prefHit(b)-medicHit(b)||dist(a)-dist(b)||rover(a)-rover(b));
+ // Each key is computed once per plan (some read crew lists), then compared in this order.
+ const keyed=plans.map(p=>({p,k:[lower(p),ride(p),rideNoP(p.legs),-cover(p),-p.gain,stationFloats(p),p.legs.length,prefHit(p)+medicHit(p),dist(p),rover(p)]}));
+ keyed.sort((a,b)=>{for(let i=0;i<a.k.length;i++)if(a.k[i]!==b.k[i])return a.k[i]-b.k[i];return 0});
+ return keyed.map(x=>x.p);
 }
 // Compare legal first moves against the next overlapping required openings.
 async function chooseRequired(plans,need,needs,r,sim){
@@ -776,9 +786,10 @@ async function buildPlan(){
  sim.pass=2;sim.skip=[];sim.preserveHolds=true;sim.preferEngineers=true;sim.hireMarks=fixedHireMarks(sim.hireMarks);
   sim.rules=withTeamFallback(sim.rules);
  try{
-  // Needs that found no move are retried once more after other moves land, because placing extras
-  // can make a ride-up possible (the extra fills the seat the rider leaves).
-  let placedSinceRetry=false;
+  // A Kelly Day officer or driver seat that found no move is retried after other moves land, because a
+  // newly placed extra can make a ride-up possible (the extra fills the seat the rider leaves). Other
+  // failed needs are not retried.
+  let placedSinceRetry=false;const kdKeys=new Set();
   for(let i=0;i<120;i++){
    const r=suggestions(data,sim);let placed=false;
    const needs=planNeeds(r,sim);
@@ -791,14 +802,15 @@ async function buildPlan(){
     setAutoProgress('Move '+(plan.length+1)+' · '+need.u+' needs '+needText(need)+'…');
     await new Promise(res=>setTimeout(res));
     let best=await chooseRequired(needPlans(r,sim,need,autoRun.rankReviews),need,needs.filter(x=>!tried.has(x.u+'|'+x.key+'|'+x.start)),r,sim);
-    if(!best){tried.add(key);continue}
+    if(!best){tried.add(key);if(need.why===2&&(need.key==='officer'||need.key==='driver'))kdKeys.add(key);continue}
     ({need,move:best}=await compareDestinations(best,need,needs,r,sim));
     const legs=best.legs.map(l=>({...l,start:best.start,end:best.end}));
     plan.push({need,legs,start:best.start,end:best.end,reason:planReason(need,legs,r)+(best.lookahead?' Keeps a qualified move available for '+best.lookahead+'.':'')});
     sim.log.push(...legs);placed=true;break;
    }
    if(placed){placedSinceRetry=true;continue}
-   if(placedSinceRetry&&tried.size){tried.clear();placedSinceRetry=false;continue}
+   const retry=[...tried].filter(k=>kdKeys.has(k));
+   if(placedSinceRetry&&autoRun.rideUps&&retry.length){for(const k of retry)tried.delete(k);placedSinceRetry=false;continue}
    break;
   }
   // Preferred team strength. Every unit is judged against its preferred count here, so a swap can never
@@ -818,6 +830,8 @@ async function buildPlan(){
    }
    if(!placed)break;
   }
+  setAutoProgress('Checking for unnecessary moves…');await new Promise(res=>setTimeout(res));
+  const pruned=prunePlan(plan,sim);sim.log=[...state.log,...pruned.flatMap(x=>x.legs)];plan.length=0;plan.push(...pruned);
   const last=suggestions(data,sim);
   autoRun.remaining=planNeeds(last,sim,true).filter(x=>!x.key.startsWith('team '));
   autoRun.balance=hiringPlan(last,{...sim,rules:state.rules});
@@ -826,6 +840,28 @@ async function buildPlan(){
   autoRun.plan=plan;autoRun.sig=initialSig;autoRun.ms=Math.round(performance.now()-t0);
  }catch(e){note('Auto-build stopped: '+e.message)}
  finally{autoRun.running=false;draw()}
+}
+// Need-minutes per unit and need for a set of planned legs (hard needs with the build's rules, and
+// preferences), and whether every leg lands.
+function planScore(base,legs){
+ // Pass 0 keeps the planner's own candidate search small; only crews and needs are read here.
+ const sim={...base,pass:0,log:[...state.log,...legs]},r=suggestions(data,sim),h=new Map(),p=new Map();
+ const add=(m,x)=>m.set(x.u+'|'+x.key,(m.get(x.u+'|'+x.key)||0)+x.n*(x.end-x.start));
+ for(const x of planNeeds(r,sim,true))add(h,x);
+ for(const x of planNeeds(r,{...sim,rules:prefRules(sim.rules)},true))if(x.key.startsWith('paid ')||x.key==='medicLt')add(p,x);
+ return {h,p,lands:legs.every(m=>r.recs.some(x=>x.id===m.id&&x.unit===m.to&&x.start<=m.start&&m.start<x.end))};
+}
+// Drop moves that turned out unnecessary, checked from the last move back. A move goes only if, without
+// it, no unit's hard need gets worse (a hard gap is never traded between units), preferences are no
+// worse overall, and every other move still lands.
+function prunePlan(plan,base){
+ let keep=plan.slice(),ref=planScore(base,keep.flatMap(x=>x.legs));
+ const noWorse=(a,b)=>[...a].every(([k,v])=>v<=(b.get(k)||0)),total=m=>[...m.values()].reduce((n,v)=>n+v,0);
+ for(let i=keep.length-1;i>=0;i--){
+  const trial=keep.filter((_,j)=>j!==i),s=planScore(base,trial.flatMap(x=>x.legs));
+  if(s.lands&&noWorse(s.h,ref.h)&&total(s.p)<=total(ref.p)){keep=trial;ref=s}
+ }
+ return keep;
 }
 function pushPlanItem(item){
  const batch=item.legs.length>1?'EX-'+(state.log.length+1):null;
@@ -1769,7 +1805,7 @@ let openingFilter='All';
 function deskOpenings(){
  const groups=['All','Seats','Officers','Drivers','Medics','Special teams'];
  const category=k=>({seats:'Seats',officer:'Officers',driver:'Drivers',medic:'Medics'})[k]||'Special teams';
- const rows=active(result.recs,at),units=fullView()?Object.keys(state.rules).map(unitDay).filter(u=>u.needs.length):gapsAt(at).map(g=>{
+ const rows=active(result.recs,at),units=fullView()?Object.keys(state.rules).map(u=>unitDay(u)).filter(u=>u.needs.length):gapsAt(at).map(g=>{
   const crew=unique(rows.filter(r=>r.unit===g.to)),rule=state.rules[g.to];
   return {unit:g.to,head:crew.length,min:rule.min,needs:Object.entries(gapProfile(g.to,crew,rule)).filter(([,n])=>n>0)};
  });

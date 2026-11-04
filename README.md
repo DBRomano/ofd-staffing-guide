@@ -39,3 +39,11 @@ Keep `index.html`, `fob-roster.mjs` and `vendor/` together on the web host. PDF 
 ## Hosting setup (once)
 
 Settings → Pages → Source: **Deploy from a branch** → Branch: `main`, folder `/ (root)` → Save.
+
+## Tests
+
+The tests load `index.html` in Node and exercise Auto-Build and the FOB reader. Node 21 or later:
+
+```bash
+node --test "tests/*"
+```

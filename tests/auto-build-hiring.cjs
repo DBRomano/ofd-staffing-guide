@@ -127,3 +127,34 @@ test('keep an eligible rover out of a second driver position when a different to
   assert.ok(run("exchangeCheck(snap,{...sim,preferEngineers:false},'Rescue 1',linked,'driver')"));
   assert.equal(run("exchangeCheck(snap,sim,'Rescue 1',linked,'driver')"),null);
 });
+
+test('the Openings board renders in the full-shift view', () => {
+  const run = planner(rescues, 4);
+  run("tab = 'Openings'; fullShift = true;");
+  assert.match(run('deskOpenings()'), /Openings/);
+});
+
+test('pruning drops a move the finished plan does not need and keeps one it does', () => {
+  const crew = [
+    member('officer', 'Engine 1', 'Lt', 'M'), member('driver', 'Engine 1', 'Eng', ''),
+    member('ff one', 'Engine 1', 'FF', ''), member('ff two', 'Engine 1', 'FF', ''),
+    member('rover', 'DIV1 Rovers', 'FF', 'E')
+  ];
+  const move = { need: { u: 'Engine 1', key: 'seats', n: 1, start: 0, end: 1440 },
+    legs: [{ id: 'rover', name: 'rover', from: 'DIV1 Rovers', to: 'Engine 1', role: 'FF', start: 0, end: 1440 }] };
+  const full = planner(crew, 4);
+  assert.equal(full('prunePlan(' + JSON.stringify([move]) + ', state).length'), 0);
+  const short = planner(crew.filter(m => m.id !== 'ff two'), 4);
+  assert.equal(short('prunePlan(' + JSON.stringify([move]) + ', state).length'), 1);
+});
+
+test('an open-seat search stops at once when nobody is spare', () => {
+  const run = planner([
+    member('officer', 'Engine 1', 'Lt', 'M'), member('driver', 'Engine 1', 'Eng', ''),
+    member('ff', 'Engine 1', 'FF', ''),
+    member('officer 2', 'Engine 2', 'Lt', 'M'), member('driver 2', 'Engine 2', 'Eng', ''),
+    member('ff 2a', 'Engine 2', 'FF', ''), member('ff 2b', 'Engine 2', 'FF', '')
+  ], 8);
+  assert.equal(run('spareAt(result, state, 0)'), false);
+  assert.equal(run("needPlans(result, state, {u: 'Engine 1', key: 'seats', n: 1, start: 0, end: 1440}).length"), 0);
+});
