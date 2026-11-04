@@ -103,7 +103,8 @@ function working(data){
  const leave=data.records.filter(r=>['SICKEX','SICKEXU','VAC','PERLV','MILLV'].includes(r.code)&&(r.start>0||r.end<shiftEnd));
  return scheduled.flatMap(r=>applyCallouts([r],leave.filter(h=>h.id===r.id)));
 }
-function projected(data,log){let recs=working(data).map(x=>({...x}));for(let m of log){let next=[];for(let r of recs){if(r.id!==m.id||r.unit!==m.from||r.start>=m.end||r.end<=m.start){next.push(r);continue}if(r.start<m.start)next.push({...r,end:m.start});next.push({...r,start:Math.max(r.start,m.start),end:Math.min(r.end,m.end),unit:m.to,acting:m.role});if(r.end>m.end)next.push({...r,start:m.end})}recs=next}return recs}
+function projected(data,log){return applyMoves(working(data).map(r=>({...r})),log)}
+function applyMoves(recs,log){for(let m of log){let next=[];for(let r of recs){if(r.id!==m.id||r.unit!==m.from||r.start>=m.end||r.end<=m.start){next.push(r);continue}if(r.start<m.start)next.push({...r,end:m.start});next.push({...r,start:Math.max(r.start,m.start),end:Math.min(r.end,m.end),unit:m.to,acting:m.role});if(r.end>m.end)next.push({...r,start:m.end})}recs=next}return recs}
 function active(recs,t){return recs.filter(r=>r.start<=t&&t<r.end)}
 function unique(rows){return [...new Map(rows.map(r=>[r.id,r])).values()]}
 function requiresL(u){return /^Tower \d+$/.test(u)||u==='Hazmat 1'||u==='Heavy Rescue 1'}
@@ -169,10 +170,15 @@ function crewAt(u,t,recs=result.recs){return unique(active(recs,t).filter(r=>r.u
 function reservedRoles(u,t,crew,marks=state.hireMarks||[]){const k=marksAt(u,t,marks);return k&&state.rules[u]?openRoles(gaps(u,crew,state.rules[u])).slice(0,k):[]}
 function hireMarked(u,role,t,marks=state.hireMarks||[],crew=null){return marksAt(u,t,marks)>0&&reservedRoles(u,t,crew||crewAt(u,t),marks).includes(role)}
 const roleNames={Lt:'lieutenant',Eng:'engineer',FF:'firefighter'};
+function fixedHireMarks(marks){return (marks||[]).filter(m=>m.source!=='auto')}
+function commitHireMark(index){
+ const mark=state.hireMarks?.[index];if(mark?.source!=='auto')return;
+ mark.source='chief';draw();note(mark.u+' held for hiring on rebuild.');
+}
 function toggleHireMark(u,key,st,e){
  const role=needRole[key]||'FF',marked=hireMarked(u,role,st);
  if(marked){const i=(state.hireMarks||[]).findIndex(x=>x.u===u&&x.start<e&&st<x.end);if(i>=0)state.hireMarks.splice(i,1);note(u+': one seat unmarked. Suggestions can fill it again.')}
- else{(state.hireMarks??=[]).push({u,key,start:st,end:e});const held=reservedRoles(u,st,crewAt(u,st));note(u+': '+held.map(r=>roleNames[r]).join(', ')+(held.length>1?' seats':' seat')+' held for hiring ('+needWhen(st,e)+'). Marks are taken top-down, so the highest open seat is held first.')}
+ else{(state.hireMarks??=[]).push({u,key,start:st,end:e,source:'chief'});const held=reservedRoles(u,st,crewAt(u,st));note(u+': '+held.map(r=>roleNames[r]).join(', ')+(held.length>1?' seats':' seat')+' held for hiring ('+needWhen(st,e)+'). Marks are taken top-down, so the highest open seat is held first.')}
  state.skip=[];draw();if($('openingDialog').open)renderOpening();
 }
 function applyCallouts(rows,callouts,markLeave=false){
@@ -307,6 +313,11 @@ function exchangeCheck(snapshot,state,target,legs,need=null,manual=null){
   const crew=snapshot.units[u]||[], rule=state.rules[u], before=gapProfile(u,crew,rule), next=gapProfile(u,after,rule);
   if(fillsLastSeatWithoutMedic(crew,after,rule))return block(u+' needs a paramedic in its last seat.');
   const benefits=[];
+  if(state.preserveHolds){
+   const reserved=reservedRoles(u,snapshot.t,crew,state.hireMarks).slice(0,before.seats);
+   const stillOpen=openRoles(next).slice(0,next.seats);
+   if(!reserved.every(role=>{const i=stillOpen.indexOf(role);if(i<0)return false;stillOpen.splice(i,1);return true}))return null;
+  }
   for(const k of Object.keys(before)){
    if(next[k]>before[k]){
     const label=({seats:'minimum headcount',officer:'officer coverage',driver:'driver coverage',medic:'paramedic coverage',missingL:'L qualification'}[k]||k);
@@ -327,7 +338,7 @@ function seatsAfter(snap,u,legs){
  for(const l of legs)if(l.to===u){const r=snap.byId.get(l.id)||(snap.units[l.from]||[]).find(x=>x.id===l.id);if(r)crew.push({...r,unit:u,acting:l.role})}
  return gapProfile(u,crew,state.rules[u]).seats;
 }
-function coordinated(data,state,result,target,at,need=null){
+function coordinated(data,state,result,target,at,need=null,onlyId=null){
  const bs=result.bs, idx=bs.indexOf(at);
  if(idx<0||!state.rules[target]?.active)return [];
  const snapshots=bs.slice(0,-1).map(t=>exchangeSnapshot(data,state,result,t)), snap=snapshots[idx];
@@ -390,6 +401,7 @@ function coordinated(data,state,result,target,at,need=null){
  if(state.pass===3)targetPool.sort((a,b)=>Number(b.qual.includes('P'))-Number(a.qual.includes('P')));
  for(depth=2;depth<=3;depth++)for(const r of targetPool){
   if(evaluations>5500)break;
+  if(onlyId&&r.id!==onlyId)continue;
   // In the ride-up pass a qualified FF already on the crew may move up to the driver seat.
   if(r.unit===target&&state.pass!==3||(state.pass===3?!canRideUp(r.rank,role):r.rank!==role))continue;
   if(!eligibleSeat(target,r,role)||!need&&(state.pass===0&&!goal.officer||state.pass===1&&!goal.driver)||state.pass===3&&!(role==='Lt'?goal.officer:goal.driver))continue;
@@ -601,7 +613,7 @@ function planNeeds(r,sim,all=false){
   .filter(x=>all||autoRun.fillKD||x.why!==2)
   .sort((a,b)=>(a.why===2)-(b.why===2)||kindRank(a)-kindRank(b)||a.why-b.why||a.start-b.start||b.roleNeeds-a.roleNeeds||a.u.localeCompare(b.u,undefined,{numeric:true}));
 }
-function needPlans(r,sim,need){
+function needPlans(r,sim,need,reviews=null){
  const groups=need.key==='officer'?[[0],[3]]:need.key==='driver'?[[1],[3]]:[[2,1,0]];
  for(const [gi,group] of groups.entries()){
   if(gi>0&&!autoRun.rideUps)break;
@@ -609,6 +621,15 @@ function needPlans(r,sim,need){
   if(need.key==='medic')plans=plans.concat(medicPool(data,sim,r,need.start,need.u).plans);
   const rankOf=l=>(r.recs.find(x=>x.id===l.id&&x.unit===l.from)||r.recs.find(x=>x.id===l.id))?.rank;
   plans=plans.filter(p=>!p.legs.some(l=>autoRun.protect.includes(l.from)||autoRun.skip.includes(l.id+'>'+l.to)||!officerMoveOk(l,rankOf(l),need.key)));
+  if(plans.some(p=>p.legs.some(l=>l.rideUp))){
+   const unchecked=p=>p.legs.find(l=>l.rideUp&&!sim.rankEdits?.[l.id]&&r.recs.some(m=>m.id===l.id&&swapKind(m)&&m.start<p.end&&p.start<m.end));
+   const preferred=rankedPlans(plans,need,r)[0],leg=unchecked(preferred);
+   if(leg){
+    if(reviews)reviews.set([leg.id,leg.to,leg.role,preferred.start,preferred.end].join('|'),{...leg,start:preferred.start,end:preferred.end});
+    return [];
+   }
+   plans=plans.filter(p=>!unchecked(p));
+  }
   if(plans.length)return plans;
  }
  return [];
@@ -662,6 +683,46 @@ async function chooseRequired(plans,need,needs,r,sim){
  }
  return winner===first?first:{...winner,lookahead:kept.join(', ')};
 }
+// Compare a contested placement and one legal follow-up at the other apparatus.
+async function compareDestinations(first,need,needs,r,sim){
+ if(!['officer','driver','seats'].includes(need.key))return {need,move:first};
+ const person=first.legs[0],rank=person.role;
+ const crewRec=r.recs.find(m=>m.id===person.id&&m.unit===person.from&&m.start<=first.start&&first.start<m.end);
+ const choices=[];
+ for(const other of [...needs].sort((a,b)=>b.roleNeeds-a.roleNeeds)){
+  if(other.u===need.u||other.key!==need.key||other.start>=first.end||other.end<=first.start||
+     (person.rideUp&&(other.why===2)!==(need.why===2))||!eligibleSeat(other.u,crewRec,rank))continue;
+  const matches=person.rideUp?needPlans(r,sim,other):coordinated(data,{...sim,pass:{Lt:0,Eng:1,FF:2}[rank]},r,other.u,other.start,other.key,person.id)
+   .filter(p=>p.legs.every(l=>!autoRun.protect.includes(l.from)&&!autoRun.skip.includes(l.id+'>'+l.to)&&officerMoveOk(l,l.role,other.key)));
+  const best=rankedPlans(matches,other,r);
+  const alt=best.find(p=>p.legs[0].id===person.id&&p.legs[0].role===rank&&rideNoP(p.legs)===rideNoP(best[0].legs));
+  if(alt){choices.push({need:other,move:alt});if(choices.length===2)break}
+ }
+ if(!choices.length)return {need,move:first};
+ const options=[{need,move:first},...choices],units=new Set(options.map(o=>o.need.u));
+ const localRules=Object.fromEntries([...units].map(u=>[u,sim.rules[u]]));
+ let bestScore=null,winner=options[0];
+ for(const option of options){
+  await new Promise(resolve=>setTimeout(resolve));
+  const trial={...sim,log:[...sim.log,...option.move.legs]};
+  let view={...r,recs:applyMoves(r.recs,option.move.legs)},floats=stationFloats(option.move),legs=option.move.legs.length;
+  // Keep all donor rules active during validation; score gaps in the contested units.
+  const nextNeeds=planNeeds(view,{...trial,rules:localRules});
+  for(const next of nextNeeds){
+   const follow=rankedPlans(needPlans(view,trial,next),next,view)[0];if(!follow)continue;
+   trial.log.push(...follow.legs);floats+=stationFloats(follow);legs+=follow.legs.length;
+   view={...view,recs:applyMoves(view.recs,follow.legs)};break;
+  }
+  const gaps=planNeeds(view,{...trial,rules:localRules},true);
+  const hours=items=>items.reduce((n,x)=>n+(x.end-x.start)*(x.n||1),0);
+  const hires=hiringPlan(view,{...trial,rules:localRules}).seats;
+  const score=[hours(gaps.filter(x=>x.key!=='seats'&&!x.key.startsWith('team '))),hours(hires),
+   hours(hires.filter(x=>x.role==='Lt')),hours(hires.filter(x=>x.role==='Eng')),floats,legs];
+  const difference=bestScore?score.findIndex((n,i)=>n!==bestScore[i]):-1;
+  if(!bestScore||difference>=0&&score[difference]<bestScore[difference]){bestScore=score;winner=option}
+ }
+ return winner;
+}
 function needText(need){return need.key==='seats'?(need.n>1?need.n+' open seats':'an open seat'):need.key==='missingL'?'L on every member':'a '+needLabel(need.key).toLowerCase()}
 function planReason(need,legs,r){
  const m=legs[0],rec=r.recs.find(x=>x.id===m.id),cause=need.why===0?'leave or removal':need.why===2?'Kelly Day':'open';
@@ -674,10 +735,11 @@ function planReason(need,legs,r){
 function setAutoProgress(text){const el=$('autoProgress');if(el)el.textContent=text}
 async function buildPlan(){
  if(autoRun.running)return;
- autoRun.running=true;autoRun.plan=null;autoRun.remaining=[];
+ const initialSig=autoSig();
+ autoRun.running=true;autoRun.rankReviews=new Map();autoRun.plan=null;autoRun.remaining=[];
  if(tab!=='Auto-build')tab='Auto-build';draw();
  const t0=performance.now(),sim=JSON.parse(JSON.stringify(state)),plan=[],tried=new Set();
- sim.pass=2;sim.skip=[];
+ sim.pass=2;sim.skip=[];sim.preserveHolds=true;sim.hireMarks=fixedHireMarks(sim.hireMarks);
   sim.rules=withTeamFallback(sim.rules);
  try{
   // Needs that found no move are retried once more after other moves land, because placing extras
@@ -686,12 +748,13 @@ async function buildPlan(){
   for(let i=0;i<120;i++){
    const r=suggestions(data,sim);let placed=false;
    const needs=planNeeds(r,sim);
-   for(const need of needs){
+   for(let need of needs){
     const key=need.u+'|'+need.key+'|'+need.start;if(tried.has(key))continue;
     setAutoProgress('Move '+(plan.length+1)+' · '+need.u+' needs '+needText(need)+'…');
     await new Promise(res=>setTimeout(res));
-    const best=await chooseRequired(needPlans(r,sim,need),need,needs.filter(x=>!tried.has(x.u+'|'+x.key+'|'+x.start)),r,sim);
+    let best=await chooseRequired(needPlans(r,sim,need,autoRun.rankReviews),need,needs.filter(x=>!tried.has(x.u+'|'+x.key+'|'+x.start)),r,sim);
     if(!best){tried.add(key);continue}
+    ({need,move:best}=await compareDestinations(best,need,needs,r,sim));
     const legs=best.legs.map(l=>({...l,start:best.start,end:best.end}));
     plan.push({need,legs,start:best.start,end:best.end,reason:planReason(need,legs,r)+(best.lookahead?' Keeps a qualified move available for '+best.lookahead+'.':'')});
     sim.log.push(...legs);placed=true;break;
@@ -722,7 +785,7 @@ async function buildPlan(){
   autoRun.balance=hiringPlan(last,{...sim,rules:state.rules});
   for(const o of autoRun.balance.seats)if(o.status==='Review on-duty placement')o.detail=placementClues(o,last,{...sim,rules:state.rules});
   autoRun.marks=autoRun.balance.seats.filter(x=>x.status==='Proposed hire').map(x=>({u:x.unit,n:1,roles:[x.role],start:x.start,end:x.end}));
-  autoRun.plan=plan;autoRun.sig=autoSig();autoRun.ms=Math.round(performance.now()-t0);
+  autoRun.plan=plan;autoRun.sig=initialSig;autoRun.ms=Math.round(performance.now()-t0);
  }catch(e){note('Auto-build stopped: '+e.message)}
  finally{autoRun.running=false;draw()}
 }
@@ -732,23 +795,38 @@ function pushPlanItem(item){
 }
 function planStale(){if(autoRun.sig===autoSig())return false;note('The roster changed after this plan was built. Rebuild it first.');return true}
 function approvePlan(){
- const p=autoRun.plan;if(!p||!p.length&&!(autoRun.marks||[]).length||planStale())return;
+ const p=autoRun.plan;if(!p||!p.length&&!(autoRun.marks||[]).length&&!(state.hireMarks||[]).some(m=>m.source==='auto')||planStale())return;
  const dialog=$('approval');if(dialog.open)return;
  const people=p.reduce((n,x)=>n+x.legs.length,0);
  const marks=autoRun.marks||[],seats=marks.reduce((n,x)=>n+x.n,0);
  $('approvalText').textContent='Approve all '+p.length+' planned moves ('+people+(people===1?' member':' members')+')'+(seats?' and mark '+seats+(seats===1?' seat':' seats')+' for hiring':'')+'?\nEach move becomes an approved move on the TeleStaff handoff. Confirm local seat authorization and driver authorization as usual.';
+ if(autoRun.rankReviews?.size)$('approvalText').textContent+='\nTrade ride-ups awaiting rank confirmation are excluded. To check them first, cancel and use Check rank.';
  $('approvalYes').textContent='Approve plan';
- $('approvalYes').onclick=()=>{if(!dialog.open)return;dialog.close();for(const item of p)pushPlanItem(item);for(const x of marks)for(let j=0;j<x.n;j++)(state.hireMarks??=[]).push({u:x.u,key:'seats',start:x.start,end:x.end});autoRun.plan=null;state.skip=[];recon='';draw();note(p.length+' planned moves approved'+(seats?' and '+seats+(seats===1?' seat':' seats')+' marked for hiring':'')+'. Review them on the TeleStaff handoff.')};
+ $('approvalYes').onclick=()=>{if(!dialog.open||planStale())return;dialog.close();state.hireMarks=fixedHireMarks(state.hireMarks);for(const item of p)pushPlanItem(item);for(const x of marks)for(let j=0;j<x.n;j++)(state.hireMarks??=[]).push({u:x.u,key:'seats',start:x.start,end:x.end,source:'auto'});autoRun.plan=null;state.skip=[];recon='';draw();note(p.length+' planned moves approved'+(seats?' and '+seats+(seats===1?' seat':' seats')+' marked for hiring':'')+'. Review them on the TeleStaff handoff.')};
  dialog.showModal();
 }
 // One item can be approved alone only if it is valid against the roster as it stands now.
 function planItemValid(item){
- const st={...state,pass:3,rules:withTeamFallback(item.need.soft?prefRules(state.rules):state.rules)},ts=[item.start,...result.bs.filter(t=>item.start<t&&t<item.end)];
+ const st={...state,hireMarks:fixedHireMarks(state.hireMarks),pass:3,preserveHolds:true,rules:withTeamFallback(item.need.soft?prefRules(state.rules):state.rules)},ts=[item.start,...result.bs.filter(t=>item.start<t&&t<item.end)];
  return ts.every(t=>!!exchangeCheck(exchangeSnapshot(data,st,result,t),st,item.need.u,item.legs,item.need.key==='medic'?null:item.need.key));
 }
 function approvePlanItem(i){
  const item=autoRun.plan?.[i];if(!item||planStale())return;
  if(!planItemValid(item)){note('This move depends on moves listed above it. Approve those first, or approve the whole plan.');return}
+ // Preserve existing holds in other windows and any tentative seats still open here.
+ const marks=state.hireMarks||[],view={...result,recs:applyMoves(result.recs,item.legs)};
+ const times=[...new Set([...result.bs,item.start,item.end,...marks.flatMap(m=>[m.start,m.end])])].sort((a,b)=>a-b);
+ state.hireMarks=marks.flatMap((m,i)=>{
+  if(m.source!=='auto'||!item.legs.some(l=>l.to===m.u)||m.end<=item.start||m.start>=item.end)return [m];
+  const kept=[];
+  for(let j=0;j<times.length-1;j++){
+   const t=times[j];if(t<m.start||t>=m.end)continue;
+   const before=marks.filter((x,k)=>x.u===m.u&&x.start<=t&&t<x.end&&(x.source!=='auto'||k<i)).length;
+   if(t>=item.start&&t<item.end&&before>=gaps(m.u,crewAt(m.u,t,view.recs),state.rules[m.u]).seats)continue;
+   if(kept.at(-1)?.end===t)kept.at(-1).end=times[j+1];else kept.push({...m,start:t,end:times[j+1]});
+  }
+  return kept;
+ });
  pushPlanItem(item);state.skip=[];recon='';note('Move for '+item.legs[0].name+' approved. Rebuilding the rest of the plan…');buildPlan();
 }
 function skipPlanItem(i){
@@ -764,16 +842,21 @@ function autoPanel(){
  if(autoRun.running||!autoRun.plan)return out;
  const p=autoRun.plan,stale=autoRun.sig!==autoSig(),rem=autoRun.remaining,remSeats=rem.filter(x=>x.key==='seats'),remRoles=rem.filter(x=>x.key!=='seats');
  const people=p.reduce((n,x)=>n+x.legs.length,0),ride=p.reduce((n,x)=>n+x.legs.filter(l=>l.rideUp).length,0);
+ const checks=[...(autoRun.rankReviews?.values()||[])].filter(l=>!state.rankEdits?.[l.id]);
+ const reviewPanel=checks.length?'<section class=card><h3>Trade ranks to confirm before a ride-up</h3>'+checks.map(l=>{
+  const i=result.recs.findIndex(m=>m.id===l.id&&swapKind(m)&&m.start<l.end&&l.start<m.end);
+  return i<0?'':'<p>'+esc(l.name)+' → '+esc(l.to)+' · '+esc(l.role)+' · '+needWhen(l.start,l.end)+' <button onclick="openRank('+i+')">Check rank</button></p>';
+ }).join('')+'<small>Confirm the rank, then rebuild to reconsider these moves.</small></section>':'';
  out+=(stale?'<p class=warn>The roster changed after this plan was built. Rebuild before approving.</p>':'')+
  '<section class=card><h2>'+(p.length?p.length+' moves planned':'No moves found')+'</h2><div class=metrics><div class=metric><small>Members moved</small><b>'+people+'</b></div><div class=metric><small>Ride-ups</small><b>'+ride+'</b></div><div class=metric><small>Unresolved need windows</small><b>'+rem.length+'</b></div></div>'+
  '<p class=muted>Built in '+(autoRun.ms/1000).toFixed(1)+' s. Moves are listed in the order they were chosen; later moves can depend on earlier ones.</p>'+
- (p.length||autoRun.marks.length?'<div class=actions><button class=primary '+(stale?'disabled':'')+' onclick="approvePlan()">Approve all '+p.length+(autoRun.marks.length?' and mark for hiring':'')+'</button><button onclick="openView(&quot;Roster&quot;)">Check on the crew roster</button></div>':'')+'</section>'+
+ (p.length||autoRun.marks.length||(state.hireMarks||[]).some(m=>m.source==='auto')?'<div class=actions><button class=primary '+(stale?'disabled':'')+' onclick="approvePlan()">Approve all '+p.length+(autoRun.marks.length?' and mark for hiring':'')+'</button><button onclick="openView(&quot;Roster&quot;)">Check on the crew roster</button></div>':'')+'</section>'+
  '<section class=card><h3>Projected shift shortage and apparatus openings</h3>'+balanceTable(autoRun.balance)+autoRun.balance.seats.filter(o=>o.status==='Review on-duty placement').map(o=>'<p>Review on-duty placement · '+esc(o.unit)+' · '+esc(o.role)+' · '+needWhen(o.start,o.end)+'<br><small>'+esc(o.detail)+'</small></p>').join('')+'</section>'+
- p.map((it,i)=>{const m=it.legs[0];
+ reviewPanel+p.map((it,i)=>{const m=it.legs[0];
   return '<article class="card planItem"><small>'+(i+1)+' · '+esc(it.need.u)+' · '+esc(needLabel(it.need.key))+(it.need.soft?(it.need.key==='medicLt'?' · preferred':' · '+prefOf(state.rules[it.need.u])+' preferred'):'')+' · '+needWhen(it.start,it.end)+'</small><h3>'+esc(m.name)+' · '+(m.from===m.to?'rides up to '+(m.role==='Lt'?'lieutenant':'driver')+' on '+esc(m.to):esc(m.from)+' → '+esc(m.to)+' · '+esc(m.role)+(m.rideUp?' (ride-up)':''))+'</h3>'+
   it.legs.slice(1).map(l=>'<p>Backfill · '+esc(l.name)+' · '+esc(l.from)+' → '+esc(l.to)+' · '+esc(l.role)+'</p>').join('')+'<p class="muted">'+esc(it.reason)+'</p>'+
   '<details><summary>View crews (as they are now)</summary>'+rosterPanel(it.legs)+'</details><div class=actions><button '+(stale?'disabled':'')+' onclick="approvePlanItem('+i+')">Approve</button><button onclick="skipPlanItem('+i+')">Skip</button></div></article>'}).join('')+
- (autoRun.marks.length?'<section class=card><h3>Proposed hiring windows · '+autoRun.marks.reduce((n,x)=>n+x.n,0)+'</h3><p class=muted>These proposed seat windows fit within the shift shortage after existing hiring marks. Approve all adds the marks.</p>'+table(['Unit','Hire','From / through'],autoRun.marks.map(x=>row([esc(x.u),esc(x.roles.map(r=>({Lt:'Lieutenant',Eng:'Engineer (driver)',FF:'Firefighter'})[r]).join(', ')||(x.n+' seats')),needWhen(x.start,x.end)])).join(''))+'</section>':'')+(rem.length?'<section class=card><h3>Still open after this plan · '+rem.length+'</h3><p class=muted>'+(remSeats.length?'Compare open seats with the shift shortage above. ':'')+(remRoles.length?'Role and letter needs had no move that keeps every other unit covered; review them on the Openings tab or with a hire.':'')+'</p>'+table(['Unit','Need','From / through'],rem.map(x=>row([esc(x.u),esc(x.key==='seats'?(x.n>1?x.n+' open seats':'Open seat'):needLabel(x.key)+(x.n>1?' × '+x.n:''))+(x.why===2?' · Kelly Day':''),needWhen(x.start,x.end)])).join(''))+'</section>':'<p class=card>Every apparatus need is covered by this plan.</p>');
+ (autoRun.marks.length?'<section class=card><h3>Proposed hiring windows · '+autoRun.marks.reduce((n,x)=>n+x.n,0)+'</h3><p class=muted>These proposed seat windows fit within the shift shortage after existing hiring marks. Approving replaces earlier Auto-Build recommendations. Chief-held seats stay reserved.</p>'+table(['Unit','Hire','From / through'],autoRun.marks.map(x=>row([esc(x.u),esc(x.roles.map(r=>({Lt:'Lieutenant',Eng:'Engineer (driver)',FF:'Firefighter'})[r]).join(', ')||(x.n+' seats')),needWhen(x.start,x.end)])).join(''))+'</section>':'')+(rem.length?'<section class=card><h3>Still open after this plan · '+rem.length+'</h3><p class=muted>'+(remSeats.length?'Compare open seats with the shift shortage above. ':'')+(remRoles.length?'Role and letter needs had no move that keeps every other unit covered; review them on the Openings tab or with a hire.':'')+'</p>'+table(['Unit','Need','From / through'],rem.map(x=>row([esc(x.u),esc(x.key==='seats'?(x.n>1?x.n+' open seats':'Open seat'):needLabel(x.key)+(x.n>1?' × '+x.n:''))+(x.why===2?' · Kelly Day':''),needWhen(x.start,x.end)])).join(''))+'</section>':'<p class=card>Every apparatus need is covered by this plan.</p>');
  return out;
 }
 function openView(view){tab=view;if(view==='Staffing walkthrough')goStep(guideIndex());else draw()}
@@ -1400,7 +1483,8 @@ function balanceTable(plan){
 }
 function handoff(){
  const plan=hiringPlan(),{seats,needs,strength}=plan;
- return '<div class=card><h3>4. Shift shortage and apparatus openings</h3>'+balanceTable(plan)+
+ const tentative=(state.hireMarks||[]).map((m,i)=>m.source==='auto'?'<p>'+esc(m.u)+' · '+needWhen(m.start,m.end)+' <button onclick="commitHireMark('+i+')">Hold for hiring on rebuild</button></p>':'').join('');
+ return '<div class=card><h3>4. Shift shortage and apparatus openings</h3>'+balanceTable(plan)+(tentative?'<details><summary>Auto-Build hiring recommendations</summary>'+tentative+'</details>':'')+
  '<p>Existing hiring marks take priority. Additional proposed hires are limited to the shift shortage in each window, in lieutenant, engineer, firefighter order. Review other openings for on-duty placement.</p>'+
  (seats.length?table(['Unit','Seat','From / through','Decision'],seats.map(o=>row([esc(o.unit),esc(o.role),needWhen(o.start,o.end),o.status])).join('')):'<p>No empty apparatus seats.</p>')+
  (strength.length?'<p class=warn>Shift strength is below the '+shiftMin()+' minimum: '+strength.map(x=>needWhen(x.start,x.end)+' short '+x.short).join(' · ')+'.</p>':'')+
