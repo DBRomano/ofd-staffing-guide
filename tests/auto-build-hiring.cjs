@@ -44,19 +44,16 @@ const rescues = [
 ];
 const r12 = { u: 'Rescue 12', key: 'seats', start: 0, end: 1440 };
 
-test('relocate an automatic hire after review and keep both crews in station', async () => {
+test('Auto-Build proposes no hires and approving clears earlier automatic ones', async () => {
   const run = planner(rescues, 4);
   run('state.hireMarks = ' + JSON.stringify([{ ...r12, source: 'auto' }]));
   await run('buildPlan()');
   assert.equal(run('autoRun.plan.length'), 1);
   assert.equal(run('autoRun.plan[0].legs[0].to'), 'Rescue 12');
-  assert.equal(run('state.hireMarks[0].u'), 'Rescue 12');
+  assert.equal(run('autoRun.marks.length'), 0);
   run("approvePlan(); $('approvalYes').onclick()");
-  assert.equal(run('state.hireMarks[0].u'), 'Rescue 1');
-  assert.equal(run('state.hireMarks[0].source'), 'auto');
-  await run('buildPlan()');
-  run("approvePlan(); $('approvalYes').onclick()");
-  assert.equal(run('state.hireMarks.length'), 1);
+  assert.equal(run('(state.hireMarks || []).length'), 0);
+  run('state.hireMarks = ' + JSON.stringify([{ ...r12, source: 'auto' }]));
   run('commitHireMark(0)');
   assert.equal(run('state.hireMarks[0].source'), 'chief');
 });
@@ -88,7 +85,7 @@ test('trade ride-up waits for confirmation of the imported rank', async () => {
   }
 });
 
-test('an assigned Engineer stays on their unit even when it has a second driver', async () => {
+test('an assigned Engineer stays on their unit; a firefighter who can drive is counted and the seat left open', async () => {
   const run = planner([
     member('officer one', 'Tower 1', 'Lt', 'LM'),
     member('driver one', 'Tower 1', 'Eng', 'LT'),
@@ -99,10 +96,11 @@ test('an assigned Engineer stays on their unit even when it has a second driver'
   run("for (const r of Object.values(state.rules)) { r.min=2; r.team='' }");
   await run('buildPlan()');
   assert.equal(run("autoRun.plan.some(p=>p.legs.some(l=>l.from==='Tower 1' && l.to!=='Tower 1'))"), false);
-  assert.ok(run("autoRun.plan.some(p=>p.legs.some(l=>l.id==='relief FF' && l.rideUp))"));
+  assert.equal(run("autoRun.plan.some(p=>p.legs.some(l=>l.rideUp))"), false);
+  assert.ok(run("autoRun.remaining.some(x=>x.u==='Tower 8' && x.key==='driver' && x.ffDrives)"));
 });
 
-test('an Engineer without tower driver qualifications does not block a qualified FF from driving', async () => {
+test('an Engineer without tower driver qualifications is not sent to a tower a firefighter can drive', async () => {
   const run = planner([
     member('rover', 'DIV1 Rovers', 'Eng', 'E'),
     member('officer', 'Tower 8', 'Lt', 'LM'),
@@ -110,7 +108,8 @@ test('an Engineer without tower driver qualifications does not block a qualified
   ], 3);
   run("state.rules['Tower 8'].min=2;state.rules['Tower 8'].team=''");
   await run('buildPlan()');
-  assert.ok(run("autoRun.plan.some(p=>p.legs.some(l=>l.id==='relief FF' && l.rideUp))"));
+  assert.equal(run("autoRun.plan.some(p=>p.legs.some(l=>l.to==='Tower 8'))"), false);
+  assert.ok(run("autoRun.remaining.some(x=>x.u==='Tower 8' && x.key==='driver' && x.ffDrives)"));
 });
 
 test('keep an eligible rover out of a second driver position when a different tower needs a driver', () => {
@@ -213,4 +212,42 @@ test('on the October example no trade member takes an officer seat or rides up b
   run("for (const r of result.recs) if (swapKind(r)) setRank(r.id, rosterRank(r.id));");
   await run('buildPlan()');
   assert.ok(run("autoRun.plan.some(p => p.legs.some(l => l.id === '124' && l.role === 'Lt'))"));
+});
+
+test('a rover Engineer still fills an Engineer seat that a firefighter on the crew could drive', async () => {
+  const run = planner([
+    member('officer', 'Engine 2', 'Lt', 'M'), member('ff driver', 'Engine 2', 'FF', 'E'),
+    member('ff', 'Engine 2', 'FF', ''), member('rover', 'Eng Rovers', 'Eng', 'E')
+  ], 4);
+  run("for (const r of Object.values(state.rules)) { r.min=4; r.team='' }");
+  await run('buildPlan()');
+  assert.ok(run("autoRun.plan.some(p=>p.legs.some(l=>l.id==='rover' && l.to==='Engine 2' && l.role==='Eng'))"));
+  assert.equal(run("autoRun.plan.some(p=>p.legs.some(l=>l.rideUp))"), false);
+});
+
+test('an Engineer rides up to Lieutenant only when no Engineer seat is open for them', async () => {
+  const needsLt = [member('driver', 'Engine 1', 'Eng', 'E'), member('ff a', 'Engine 1', 'FF', ''),
+    member('ff b', 'Engine 1', 'FF', ''), member('rover', 'Eng Rovers', 'Eng', 'EM')];
+  const needsDriver = [member('officer', 'Engine 2', 'Lt', 'M'), member('ff c', 'Engine 2', 'FF', ''),
+    member('ff d', 'Engine 2', 'FF', '')];
+  const both = planner([...needsLt, ...needsDriver], 7);
+  both("for (const r of Object.values(state.rules)) { r.min=4; r.team='' }");
+  await both('buildPlan()');
+  assert.ok(both("autoRun.plan.some(p=>p.legs.some(l=>l.id==='rover' && l.to==='Engine 2' && l.role==='Eng'))"));
+  assert.equal(both("autoRun.plan.some(p=>p.legs.some(l=>l.id==='rover' && l.role==='Lt'))"), false);
+  const onlyLt = planner(needsLt, 4);
+  onlyLt("for (const r of Object.values(state.rules)) { r.min=4; r.team='' }");
+  await onlyLt('buildPlan()');
+  assert.ok(onlyLt("autoRun.plan.some(p=>p.legs.some(l=>l.id==='rover' && l.to==='Engine 1' && l.role==='Lt'))"));
+});
+
+test('a rover who starts part-way through the shift covers the rest of an opening', async () => {
+  const run = planner([
+    member('driver', 'Engine 8', 'Eng', 'M'), member('ff', 'Engine 8', 'FF', ''),
+    { ...member('late rover', 'DIV1 Rovers', 'Lt', 'M'), start: 720, end: 1440 }
+  ], 3);
+  run("for (const r of Object.values(state.rules)) { r.min=3; r.team='' }");
+  await run('buildPlan()');
+  assert.ok(run("autoRun.plan.some(p=>p.legs.some(l=>l.id==='late rover' && l.to==='Engine 8' && l.role==='Lt' && l.start===720 && l.end===1440))"));
+  assert.ok(run("autoRun.remaining.some(x=>x.u==='Engine 8' && x.key==='officer' && x.start===0 && x.end===720)"));
 });
