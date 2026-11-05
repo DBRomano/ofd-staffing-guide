@@ -88,7 +88,7 @@ test('trade ride-up waits for confirmation of the imported rank', async () => {
   }
 });
 
-test('an extra qualified Engineer can cover another tower without taking its assigned driver', async () => {
+test('an assigned Engineer stays on their unit even when it has a second driver', async () => {
   const run = planner([
     member('officer one', 'Tower 1', 'Lt', 'LM'),
     member('driver one', 'Tower 1', 'Eng', 'LT'),
@@ -98,8 +98,8 @@ test('an extra qualified Engineer can cover another tower without taking its ass
   ], 5);
   run("for (const r of Object.values(state.rules)) { r.min=2; r.team='' }");
   await run('buildPlan()');
-  assert.ok(run("autoRun.plan.some(p=>p.legs.some(l=>l.from==='Tower 1' && l.to==='Tower 8' && l.role==='Eng' && !l.rideUp))"));
-  assert.equal(run("autoRun.plan.some(p=>p.legs.some(l=>l.id==='relief FF' && l.rideUp))"), false);
+  assert.equal(run("autoRun.plan.some(p=>p.legs.some(l=>l.from==='Tower 1' && l.to!=='Tower 1'))"), false);
+  assert.ok(run("autoRun.plan.some(p=>p.legs.some(l=>l.id==='relief FF' && l.rideUp))"));
 });
 
 test('an Engineer without tower driver qualifications does not block a qualified FF from driving', async () => {
@@ -157,4 +157,60 @@ test('an open-seat search stops at once when nobody is spare', () => {
   ], 8);
   assert.equal(run('spareAt(result, state, 0)'), false);
   assert.equal(run("needPlans(result, state, {u: 'Engine 1', key: 'seats', n: 1, start: 0, end: 1440}).length"), 0);
+});
+
+// Shift trades (STW) and Kelly swaps (KSON) may be placed where they fit best.
+const tradeCrew = code => [
+  member('officer one', 'Engine 1', 'Lt', 'M'), member('trade engineer', 'Engine 1', 'Eng', 'M', code),
+  member('assigned engineer', 'Engine 1', 'Eng', ''), member('ff one', 'Engine 1', 'FF', ''),
+  member('ff two', 'Engine 1', 'FF', ''),
+  member('officer two', 'Engine 2', 'Lt', 'M'), member('ff three', 'Engine 2', 'FF', ''),
+  member('ff four', 'Engine 2', 'FF', ''), member('ff five', 'Engine 2', 'FF', '')
+];
+const moved = id => `autoRun.plan.some(p=>p.legs.some(l=>l.id==='${id}' && l.from!==l.to))`;
+
+test('a trade or Kelly swap Engineer with a confirmed rank moves to a unit that needs a driver', async () => {
+  for (const code of ['STW', 'KSON']) {
+    const run = planner(tradeCrew(code), 8);
+    run("for (const r of Object.values(state.rules)) r.team=''; setRank('trade engineer', 'Eng')");
+    await run('buildPlan()');
+    assert.ok(run("autoRun.plan.some(p=>p.legs.some(l=>l.id==='trade engineer' && l.to==='Engine 2' && l.role==='Eng'))"), code);
+    assert.equal(run(moved('assigned engineer')), false, code);
+  }
+});
+
+test('a trade Engineer whose rank is not confirmed is listed for review instead of moved', async () => {
+  const run = planner(tradeCrew('STW'), 8);
+  run("for (const r of Object.values(state.rules)) r.team=''");
+  await run('buildPlan()');
+  assert.equal(run(moved('trade engineer')), false);
+  assert.equal(run(moved('assigned engineer')), false);
+  assert.ok(run("[...autoRun.rankReviews.values()].some(l=>l.id==='trade engineer')"));
+});
+
+test('a trade or Kelly swap firefighter moves to a unit with an open seat', async () => {
+  for (const code of ['STW', 'KSON']) {
+    const run = planner([
+      member('officer one', 'Engine 1', 'Lt', 'M'), member('driver one', 'Engine 1', 'Eng', ''),
+      member('ff one', 'Engine 1', 'FF', ''), member('ff two', 'Engine 1', 'FF', ''),
+      member('trade ff', 'Engine 1', 'FF', 'E', code),
+      member('officer two', 'Engine 2', 'Lt', 'M'), member('driver two', 'Engine 2', 'Eng', ''),
+      member('ff three', 'Engine 2', 'FF', '')
+    ], 8);
+    run("for (const r of Object.values(state.rules)) r.team=''");
+    await run('buildPlan()');
+    assert.ok(run("autoRun.plan.some(p=>p.legs.some(l=>l.to==='Engine 2' && l.from==='Engine 1'))"), code);
+  }
+});
+
+test('on the October example no trade member takes an officer seat or rides up before their rank is confirmed', async () => {
+  const run = planner([member('x', 'Engine 1', 'FF', '')], 141);
+  run("data = parseRows(examples['3'].rows, examples['3'].date); state = {rules: rulesFor(data), log: [], locks: [], skip: [], pass: 2, minimum: 141}; draw();");
+  await run('buildPlan()');
+  const unconfirmed = `autoRun.plan.flatMap(p => p.legs.filter(l => awaitingRank({...p, legs: [l]}, result, state)).map(l => l.name))`;
+  assert.equal(run('JSON.stringify(' + unconfirmed + ')'), '[]');
+  assert.ok(run('autoRun.rankReviews.size'));
+  run("for (const r of result.recs) if (swapKind(r)) setRank(r.id, rosterRank(r.id));");
+  await run('buildPlan()');
+  assert.ok(run("autoRun.plan.some(p => p.legs.some(l => l.id === '124' && l.role === 'Lt'))"));
 });

@@ -137,11 +137,14 @@ function softChips(u){
  return xs.length?'<div class="needList soft">'+xs.map(x=>'<button type=button class="softNeed" data-unit="'+esc(u)+'" data-need="'+esc(x.key)+'" onclick="at='+x.start+';openCandidates(this.dataset.unit,this.dataset.need,false,true)">'+esc(x.label)+'<small>'+needWhen(x.start,x.end)+'</small></button>').join('')+'</div>':'';
 }
 // Assigned lieutenants and engineers stay on their units; only floating (rover) officers are moved
-// for staffing. Exception: an engineer may move within the same station to balance paramedics.
+// for staffing, along with members working a shift trade or Kelly swap. Exception: an engineer may move
+// within the same station to balance paramedics.
 function sameStation(a,b){const x=data.units[a]?.station,y=data.units[b]?.station;return !!x&&x===y}
-function officerMoveOk(l,rank,needKey,crews=null){
+function officerMoveOk(l,rank,needKey,crews=null,rec=null){
  if(l.from===l.to||kind(l.from)==='Rover'||!['Lt','Eng'].includes(rank))return true;
- if(crews&&rank==='Eng'&&l.role==='Eng'&&needKey==='driver'&&crews(l.from).some(r=>r.id!==l.id&&r.rank==='Eng'&&(r.acting||r.rank)==='Eng'&&eligibleSeat(l.from,r,'Eng')))return true;
+ // Members working a shift trade (STW) or Kelly swap (KSON) may be placed wherever they fit best.
+ const m=rec||crews?.(l.from)?.find(x=>x.id===l.id);
+ if(m&&swapKind(m))return true;
  return rank==='Eng'&&(needKey==='medic'||needKey==='medicLt')&&sameStation(l.from,l.to);
 }
 function canRideUp(rank,role){return rank==='FF'&&role==='Eng'||rank==='Eng'&&role==='Lt'}
@@ -232,7 +235,7 @@ function suggestions(data,state){
  let options=[];
  for(let r of unique(all)){
  let from=r.unit,rover=kind(from)==='Rover',sr=state.rules[from],inPlace=from===to;
- if(!officerMoveOk({from,to},r.rank,null))continue;
+ if(!officerMoveOk({from,to},r.rank,null,null,r))continue;
  if((!rover&&!sr)||(!rover&&!sr.active)||counts[r.id].size!==1||state.locks.includes(r.id)||state.log.some(m=>m.id===r.id&&m.start<end&&m.end>t))continue;
  if(pass===0&&(!rover||r.rank!=='Lt')||pass===1&&r.rank!=='Eng'||pass===2&&r.rank!=='FF'||pass===3&&!canRideUp(r.rank,role)||inPlace&&pass!==3)continue;
  if(!eligibleSeat(to,r,role))continue;
@@ -649,6 +652,11 @@ function spareAt(r,sim,t){
  const snap=exchangeSnapshot(data,sim,r,t);
  return snap.eligible.some(m=>!autoRun.protect.includes(m.unit)&&(kind(m.unit)==='Rover'||unique(snap.units[m.unit]||[]).length>(sim.rules[m.unit]?.min??Infinity)));
 }
+// A trade or Kelly swap member shows the rank of the position they fill, so a ride-up, or an officer
+// seat on another unit, waits until their own rank is confirmed. Returns the first such leg.
+function awaitingRank(p,r,sim){
+ return p.legs.find(l=>(l.rideUp||l.from!==l.to&&['Lt','Eng'].includes(l.role))&&!sim.rankEdits?.[l.id]&&r.recs.some(m=>m.id===l.id&&swapKind(m)&&m.start<p.end&&p.start<m.end));
+}
 function needPlans(r,sim,need,reviews=null){
  // Filling an empty seat adds a person to the unit, which needs someone spare somewhere at that time.
  if(need.key==='seats'&&!spareAt(r,sim,need.start))return [];
@@ -659,8 +667,8 @@ function needPlans(r,sim,need,reviews=null){
   if(need.key==='medic')plans=plans.concat(medicPool(data,sim,r,need.start,need.u).plans);
   const rankOf=l=>(r.recs.find(x=>x.id===l.id&&x.unit===l.from)||r.recs.find(x=>x.id===l.id))?.rank;
   plans=plans.filter(p=>!p.legs.some(l=>autoRun.protect.includes(l.from)||autoRun.skip.includes(l.id+'>'+l.to)||!officerMoveOk(l,rankOf(l),need.key,u=>crewAt(u,p.start,r.recs))));
-  if(plans.some(p=>p.legs.some(l=>l.rideUp))){
-   const unchecked=p=>p.legs.find(l=>l.rideUp&&!sim.rankEdits?.[l.id]&&r.recs.some(m=>m.id===l.id&&swapKind(m)&&m.start<p.end&&p.start<m.end));
+  const unchecked=p=>awaitingRank(p,r,sim);
+  if(plans.some(unchecked)){
    const preferred=rankedPlans(plans,need,r)[0],leg=unchecked(preferred);
    if(leg){
     if(reviews)reviews.set([leg.id,leg.to,leg.role,preferred.start,preferred.end].join('|'),{...leg,start:preferred.start,end:preferred.end});
@@ -735,7 +743,7 @@ async function compareDestinations(first,need,needs,r,sim){
   if(other.u===need.u||other.key!==need.key||other.start>=first.end||other.end<=first.start||
      (person.rideUp&&(other.why===2)!==(need.why===2))||!eligibleSeat(other.u,crewRec,rank))continue;
   const matches=person.rideUp?needPlans(r,sim,other):coordinated(data,{...sim,pass:{Lt:0,Eng:1,FF:2}[rank]},r,other.u,other.start,other.key,person.id)
-   .filter(p=>p.legs.every(l=>!autoRun.protect.includes(l.from)&&!autoRun.skip.includes(l.id+'>'+l.to)&&officerMoveOk(l,l.role,other.key,u=>crewAt(u,p.start,r.recs))));
+   .filter(p=>!awaitingRank(p,r,sim)&&p.legs.every(l=>!autoRun.protect.includes(l.from)&&!autoRun.skip.includes(l.id+'>'+l.to)&&officerMoveOk(l,l.role,other.key,u=>crewAt(u,p.start,r.recs))));
   const best=rankedPlans(matches,other,r);
   const alt=best.find(p=>p.legs[0].id===person.id&&p.legs[0].role===rank&&rideNoP(p.legs)===rideNoP(best[0].legs));
   if(alt){choices.push({need:other,move:alt});if(choices.length===2)break}
@@ -874,7 +882,7 @@ function approvePlan(){
  const people=p.reduce((n,x)=>n+x.legs.length,0);
  const marks=autoRun.marks||[],seats=marks.reduce((n,x)=>n+x.n,0);
  $('approvalText').textContent='Approve all '+p.length+' planned moves ('+people+(people===1?' member':' members')+')'+(seats?' and mark '+seats+(seats===1?' seat':' seats')+' for hiring':'')+'?\nEach move becomes an approved move on the TeleStaff handoff. Confirm local seat authorization and driver authorization as usual.';
- if(autoRun.rankReviews?.size)$('approvalText').textContent+='\nTrade ride-ups awaiting rank confirmation are excluded. To check them first, cancel and use Check rank.';
+ if(autoRun.rankReviews?.size)$('approvalText').textContent+='\nTrade and Kelly swap moves awaiting rank confirmation are excluded. To check them first, cancel and use Check rank.';
  $('approvalYes').textContent='Approve plan';
  $('approvalYes').onclick=()=>{if(!dialog.open||planStale())return;dialog.close();state.hireMarks=fixedHireMarks(state.hireMarks);for(const item of p)pushPlanItem(item);for(const x of marks)for(let j=0;j<x.n;j++)(state.hireMarks??=[]).push({u:x.u,key:'seats',start:x.start,end:x.end,source:'auto'});autoRun.plan=null;state.skip=[];recon='';draw();note(p.length+' planned moves approved'+(seats?' and '+seats+(seats===1?' seat':' seats')+' marked for hiring':'')+'. Review them on the TeleStaff handoff.')};
  dialog.showModal();
@@ -917,7 +925,7 @@ function autoPanel(){
  const p=autoRun.plan,stale=autoRun.sig!==autoSig(),rem=autoRun.remaining,remSeats=rem.filter(x=>x.key==='seats'),remRoles=rem.filter(x=>x.key!=='seats');
  const people=p.reduce((n,x)=>n+x.legs.length,0),ride=p.reduce((n,x)=>n+x.legs.filter(l=>l.rideUp).length,0);
  const checks=[...(autoRun.rankReviews?.values()||[])].filter(l=>!state.rankEdits?.[l.id]);
- const reviewPanel=checks.length?'<section class=card><h3>Trade ranks to confirm before a ride-up</h3>'+checks.map(l=>{
+ const reviewPanel=checks.length?'<section class=card><h3>Trade and Kelly swap ranks to confirm before a ride-up or officer move</h3>'+checks.map(l=>{
   const i=result.recs.findIndex(m=>m.id===l.id&&swapKind(m)&&m.start<l.end&&l.start<m.end);
   return i<0?'':'<p>'+esc(l.name)+' → '+esc(l.to)+' · '+esc(l.role)+' · '+needWhen(l.start,l.end)+' <button onclick="openRank('+i+')">Check rank</button></p>';
  }).join('')+'<small>Confirm the rank, then rebuild to reconsider these moves.</small></section>':'';
