@@ -281,3 +281,44 @@ test("an engine's Engineer is not moved to the station's rescue", async () => {
   await run('buildPlan()');
   assert.equal(run("autoRun.plan.some(p=>p.legs.some(l=>l.id==='engine engineer' && l.from!==l.to))"), false);
 });
+
+test('reserve overtime in rank order before riding members up', async () => {
+  const run=planner([
+    member('driver','Engine 2','Eng','M'),member('relief','Engine 2','FF','EP'),
+    member('officer','Engine 3','Lt','M'),member('second relief','Engine 3','FF','EP'),
+    member('officer four','Engine 4','Lt','M'),member('driver four','Engine 4','Eng','')
+  ],9);
+  run("for(const rule of Object.values(state.rules))rule.min=3");
+  await run('buildPlan()');
+  assert.equal(run("autoRun.plan.flatMap(p=>p.legs).filter(l=>l.rideUp).length"),0);
+  // Hiring is the officer's decision: the openings stay listed, no hires are proposed.
+  assert.equal(run("autoRun.marks.length"),0);
+  assert.ok(run("['Engine 2','Engine 3','Engine 4'].every(u=>autoRun.remaining.some(x=>x.u===u))"));
+});
+
+test('a firefighter who can drive is counted instead of riding up, and a late rover fills the seat', async () => {
+  const run=planner([
+    member('officer','Engine 3','Lt','M'),member('relief','Engine 3','FF','EP'),
+    {...member('extra','DIV1 Rovers','FF',''),start:720}
+  ],3);
+  run("state.rules['Engine 3'].min=3");
+  await run('buildPlan()');
+  assert.equal(run("autoRun.plan.flatMap(p=>p.legs).some(l=>l.id==='relief'&&l.rideUp)"),false);
+  assert.ok(run("autoRun.plan.flatMap(p=>p.legs).some(l=>l.id==='extra'&&l.to==='Engine 3'&&l.start===720)"));
+  assert.ok(run("autoRun.remaining.some(x=>x.u==='Engine 3'&&x.key==='driver'&&x.ffDrives)"));
+  assert.equal(run("autoRun.marks.length"),0);
+});
+
+test('missing fleet headings produce empty units, coverage gaps and printable crews', () => {
+  const run=planner([member('driver','Engine 7','Eng','M')],141);
+  run("data.warnings=[];start(data,'Imported roster')");
+  for(const unit of ['Rescue 2','Rescue 7']){
+    assert.equal(run(`state.rules['${unit}'].min`),2);
+    assert.equal(run(`unitDay('${unit}').low`),0);
+    assert.ok(run(`planNeeds(result,state).some(n=>n.u==='${unit}'&&n.key==='seats'&&n.n===2)`));
+    assert.ok(run(`rosterExportHTML().includes('<strong>${unit}</strong>')`));
+  }
+  assert.equal(run("data.units['Rescue 7'].region"),'D-3');
+  assert.equal(run("unique(active(result.recs,0)).length"),1);
+  assert.equal(run("completeRosterUnits(data).warnings.length"),1);
+});
