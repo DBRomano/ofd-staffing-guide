@@ -251,3 +251,33 @@ test('a rover who starts part-way through the shift covers the rest of an openin
   assert.ok(run("autoRun.plan.some(p=>p.legs.some(l=>l.id==='late rover' && l.to==='Engine 8' && l.role==='Lt' && l.start===720 && l.end===1440))"));
   assert.ok(run("autoRun.remaining.some(x=>x.u==='Engine 8' && x.key==='officer' && x.start===0 && x.end===720)"));
 });
+
+test("the Engineer driving a station's rescue moves to that station's engine when it needs an Engineer", async () => {
+  const crew = [
+    member('officer', 'Engine 6', 'Lt', 'M'), member('ff a', 'Engine 6', 'FF', 'E'), member('ff b', 'Engine 6', 'FF', ''),
+    member('rescue engineer', 'Rescue 6', 'Eng', ''), member('rescue ff', 'Rescue 6', 'FF', 'EM')
+  ];
+  const station = (run, rescueStation) => run(`for (const r of Object.values(state.rules)) r.team=''; state.rules['Engine 6'].min=4; state.rules['Rescue 6'].min=2;
+    data.units['Engine 6'].station='Station 6'; data.units['Rescue 6'].station='${rescueStation}'; draw();`);
+  const same = planner(crew, 6);
+  station(same, 'Station 6');
+  await same('buildPlan()');
+  assert.ok(same("autoRun.plan.some(p=>p.legs.some(l=>l.id==='rescue engineer' && l.from==='Rescue 6' && l.to==='Engine 6' && l.role==='Eng'))"));
+  assert.ok(same("autoRun.remaining.some(x=>x.u==='Rescue 6' && x.key==='seats')"));
+  const other = planner(crew, 6);
+  station(other, 'Station 9');
+  await other('buildPlan()');
+  assert.equal(other("autoRun.plan.some(p=>p.legs.some(l=>l.id==='rescue engineer' && l.from!==l.to))"), false);
+});
+
+test("an engine's Engineer is not moved to the station's rescue", async () => {
+  const run = planner([
+    member('officer', 'Engine 6', 'Lt', 'M'), member('engine engineer', 'Engine 6', 'Eng', ''),
+    member('ff a', 'Engine 6', 'FF', ''), member('ff b', 'Engine 6', 'FF', ''), member('ff c', 'Engine 6', 'FF', ''),
+    member('rescue ff', 'Rescue 6', 'FF', 'M')
+  ], 6);
+  run(`for (const r of Object.values(state.rules)) r.team=''; state.rules['Engine 6'].min=4; state.rules['Rescue 6'].min=2;
+    data.units['Engine 6'].station='Station 6'; data.units['Rescue 6'].station='Station 6'; draw();`);
+  await run('buildPlan()');
+  assert.equal(run("autoRun.plan.some(p=>p.legs.some(l=>l.id==='engine engineer' && l.from!==l.to))"), false);
+});

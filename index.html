@@ -137,16 +137,20 @@ function softChips(u){
  return xs.length?'<div class="needList soft">'+xs.map(x=>'<button type=button class="softNeed" data-unit="'+esc(u)+'" data-need="'+esc(x.key)+'" onclick="at='+x.start+';openCandidates(this.dataset.unit,this.dataset.need,false,true)">'+esc(x.label)+'<small>'+needWhen(x.start,x.end)+'</small></button>').join('')+'</div>':'';
 }
 // Assigned lieutenants and engineers stay on their units; only floating (rover) officers are moved
-// for staffing, along with members working a shift trade or Kelly swap. Exception: an engineer may move
-// within the same station to balance paramedics.
+// for staffing, along with members working a shift trade or Kelly swap. Exceptions within a station: an
+// engineer may move to balance paramedics, and the rescue's engineer may move to the engine (below).
 function sameStation(a,b){const x=data.units[a]?.station,y=data.units[b]?.station;return !!x&&x===y}
 function officerMoveOk(l,rank,needKey,crews=null,rec=null){
  if(l.from===l.to||kind(l.from)==='Rover'||!['Lt','Eng'].includes(rank))return true;
  // Members working a shift trade (STW) or Kelly swap (KSON) may be placed wherever they fit best.
  const m=rec||crews?.(l.from)?.find(x=>x.id===l.id);
  if(m&&swapKind(m))return true;
+ if(rank==='Eng'&&rescueToEngine(l))return true;
  return rank==='Eng'&&(needKey==='medic'||needKey==='medicLt')&&sameStation(l.from,l.to);
 }
+// The Engineer driving a station's rescue may move to that station's engine when the engine needs an
+// Engineer. The engine comes first; the rescue's opening is left for the officer.
+function rescueToEngine(l){return /^Rescue \d+$/.test(l.from)&&/^Engine \d+$/.test(l.to)&&l.role==='Eng'&&sameStation(l.from,l.to)}
 function canRideUp(rank,role){return rank==='FF'&&role==='Eng'||rank==='Eng'&&role==='Lt'}
 function eligibleSeat(u,r,role){
  if(requiresL(u)&&!r.qual.includes('L'))return false;
@@ -354,6 +358,9 @@ function exchangeCheck(snapshot,state,target,legs,need=null,manual=null){
   }
   for(const k of Object.keys(before)){
    if(next[k]>before[k]){
+    // The rescue's Engineer may leave for the station's engine: engine drivers come before rescue drivers,
+    // and the rescue's opening is left for the officer.
+    if((k==='seats'||k==='driver')&&legs.some(l=>l.from===u&&rescueToEngine(l)&&snapshot.byId.get(l.id)?.rank==='Eng'))continue;
     const label=({seats:'minimum headcount',officer:'officer coverage',driver:'driver coverage',medic:'paramedic coverage',missingL:'L qualification'}[k]||k);
     if(manual?.backfills&&(u!==target||legs[0].endRideUp&&legs[0].from===u))manual.backfills.push(label);
     else return block(u+' needs a backfill for '+label+'.');
